@@ -24,12 +24,14 @@
   .big{width:100%;padding:16px;font-size:18px;margin-top:8px}
   .ok{background:var(--ok);color:#fff;border-color:var(--ok)}
   input,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:15px;margin:4px 0}
+  input.seq{font-size:32px;font-weight:700;text-align:center;padding:6px}
   label{font-size:13px;color:var(--muted)}
   .reader{width:100%;border-radius:12px;overflow:hidden;background:#000;min-height:200px}
   .stop{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)}
   .stop:last-child{border-bottom:0}
-  .stop .n{width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;flex-shrink:0}
+  .stop .n{min-width:34px;height:34px;padding:0 6px;border-radius:17px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:17px;flex-shrink:0}
   .stop.done .n{background:var(--ok)}
+  .stop.noaddr .n{background:var(--warn)}
   .stop .body{flex:1;min-width:0}
   .stop .addr{font-weight:600;word-break:break-word}
   .stop .meta{font-size:13px;color:var(--muted)}
@@ -40,14 +42,15 @@
   .toast.show{opacity:1}
   .cur{text-align:center;padding:20px 8px}
   .cur .addr{font-size:24px;font-weight:700;margin:8px 0}
-  /* 分拣结果大字 */
-  .sortbox{text-align:center;padding:16px 8px;border-radius:12px;min-height:150px}
+  .cur .num{font-size:64px;font-weight:800;line-height:1}
+  .sortbox{text-align:center;padding:16px 8px;border-radius:12px;min-height:120px;background:#f3f4f6}
   .sortbox .num{font-size:96px;font-weight:800;line-height:1}
   .sortbox .lbl{font-size:18px;color:var(--muted)}
-  .sortbox .addr{font-size:18px;font-weight:600;margin-top:6px}
+  .sortbox .addr{font-size:18px;font-weight:600;margin-top:6px;word-break:break-word}
   .sortbox.hit{background:#dcfce7}
   .sortbox.miss{background:#fee2e2}
   .sortbox.warn{background:#fef3c7}
+  .sortbox.new{background:#dbeafe}
   .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:8px 0}
   .bar div{height:100%;background:var(--ok)}
 </style>
@@ -59,23 +62,28 @@
 <!-- ① 扫描录入 -->
 <section class="tab active" id="tab-scan">
   <div class="card">
+    <div class="sortbox" id="scanbox"><div class="lbl">开始扫码后，对准面单上的 TBA 条码</div></div>
+  </div>
+  <div class="card">
     <div id="reader" class="reader"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
       <button class="btn primary" id="startScan">开始扫码</button>
       <button class="btn" id="stopScanBtn">停止</button>
     </div>
-    <p class="small">第一遍：取货时逐件扫码 + 拍面单录地址。录完全部后到「站点」页点「优化顺序」，再到「分拣」页扫第二遍看第几站。</p>
+    <p class="small">取货时：Flex App 扫一下看到序号 → 这里扫一下，输入同样的序号，点加入。地址可以之后再补。已录入的包裹再扫会直接弹出序号。</p>
   </div>
   <div class="card">
-    <label>运单号（扫码自动填入，可手输）</label>
+    <label>Flex 显示的序号（第几站）</label>
+    <input id="seq" class="seq" inputmode="numeric" pattern="[0-9]*" placeholder="#">
+    <label>运单号（扫码自动填入）</label>
     <input id="tba" placeholder="TBA…">
-    <label>地址（拍面单自动 OCR，或手输）</label>
-    <textarea id="addr" rows="2" placeholder="123 Main St, City, ST 98000"></textarea>
+    <label>地址（可选：拍面单 OCR，或手输，或之后在站点页补）</label>
+    <textarea id="addr" rows="2" placeholder="740 S Milliken Ave Unit C, Ontario CA 91761"></textarea>
     <label>备注</label>
-    <input id="note" placeholder="放门口 / 前台 / 电话…">
+    <input id="note" placeholder="送达时段 / 放门口 / 电话…">
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
       <label class="btn" style="cursor:pointer">📷 拍面单 OCR<input type="file" accept="image/*" capture="environment" id="ocrFile" hidden></label>
-      <button class="btn primary" id="addStop">➕ 加入站点</button>
+      <button class="btn primary" id="addStop">➕ 加入</button>
     </div>
     <div class="small" id="ocrStatus" style="white-space:pre-wrap"></div>
   </div>
@@ -85,13 +93,14 @@
 <section class="tab" id="tab-list">
   <div class="card">
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn primary" id="optimize">🧭 优化顺序</button>
+      <button class="btn primary" id="sortSeq">🔢 按 Flex 序号排序</button>
+      <button class="btn" id="optimize">🧭 自动优化顺序</button>
       <button class="btn" id="clearDone">清除已送达</button>
       <button class="btn" id="clearAll">清空</button>
     </div>
     <div class="small" id="optStatus" style="margin-top:6px"></div>
-    <details style="margin-top:8px"><summary class="small">Google API Key（可选，地理编码更快更准）</summary>
-      <input id="apiKey" placeholder="AIza…"><span class="small">需开启 Geocoding API。不填则用 OpenStreetMap 免费编码，每站约 1 秒。</span>
+    <details style="margin-top:8px"><summary class="small">Google API Key（可选，仅自动优化时用）</summary>
+      <input id="apiKey" placeholder="AIza…"><span class="small">需开启 Geocoding API。不填则用 OpenStreetMap 免费编码。</span>
     </details>
   </div>
   <div class="card" id="stops"></div>
@@ -111,7 +120,7 @@
       <button class="btn" id="stopSortBtn">停止</button>
       <button class="btn" id="resetSort">重置分拣记录</button>
     </div>
-    <p class="small">第二遍：装车时再扫一次，屏幕显示这件是第几站。号码小的放上面/靠外。</p>
+    <p class="small">装车时再扫一次，屏幕大字显示序号。号码小的放上面/靠外。</p>
   </div>
 </section>
 
@@ -124,7 +133,7 @@
 <section class="tab" id="tab-export">
   <div class="card">
     <h3 style="margin:0 0 8px">Google Maps 多点导航</h3>
-    <p class="small">每条链接最多 10 站，多了自动拆分。</p>
+    <p class="small">每条链接最多 10 站，多了自动拆分。缺地址的站点不包含。</p>
     <div id="mapLinks"></div>
   </div>
   <div class="card">
@@ -151,6 +160,7 @@
 // ---------- state ----------
 const KEY='flexStops';
 let stops=[]; try{stops=JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){}
+stops.forEach(s=>{if(s.seq===undefined)s.seq=null;if(!s.loaded)s.loaded=[];if(!s.address)s.address=''});
 let ordered=false; try{ordered=localStorage.getItem('flexOrdered')==='1'}catch(e){}
 const $=s=>document.querySelector(s);
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(stops));localStorage.setItem('flexOrdered',ordered?'1':'0')}catch(e){} render()};
@@ -160,6 +170,10 @@ $('#apiKey').addEventListener('change',e=>{try{localStorage.setItem('gkey',e.tar
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TBA=/TBA[0-9A-Z]{10,}/i;
 const findByCode=code=>stops.findIndex(s=>s.tba.includes(code));
+// 显示用的站号：优先 Flex 序号，否则列表位置
+const numOf=i=>stops[i].seq!=null?stops[i].seq:(i+1);
+const numLbl=i=>stops[i].seq!=null?'Flex 第':'第';
+const buzz=p=>{if(navigator.vibrate)navigator.vibrate(p)};
 
 // ---------- tabs ----------
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
@@ -181,36 +195,42 @@ async function startScanner(elId,onCode){
   try{
     await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:280,height:160}},txt=>{
       const now=Date.now(); if(txt===lastCode&&now-lastAt<2500)return; lastCode=txt;lastAt=now;
-      const m=txt.match(TBA); onCode(m?m[0].toUpperCase():txt.trim());
+      const m=txt.match(TBA); if(!m)return; // 面单上有多个码，只认 TBA
+      onCode(m[0].toUpperCase());
     });
   }catch(e){scanner=null;scannerEl='';toast('无法打开摄像头：'+e)}
 }
 async function stopScan(){if(!scanner)return;const s=scanner;scanner=null;scannerEl='';try{await s.stop();s.clear()}catch(e){}}
-const buzz=p=>{if(navigator.vibrate)navigator.vibrate(p)};
+
+// 大字框渲染
+function showBox(el,cls,html){el.className='sortbox '+cls;el.innerHTML=html}
+function hitHtml(i,extra){const s=stops[i];return '<div class="lbl">'+numLbl(i)+'</div><div class="num">'+numOf(i)+'</div><div class="lbl">站'+(extra||'')+'</div><div class="addr">'+(s.address?esc(s.address):'（缺地址）')+'</div>'}
 
 // ① 录入扫码
 $('#startScan').onclick=()=>startScanner('reader',code=>{
   const i=findByCode(code);
-  if(i>=0){buzz([60,60,60]);toast('已录入：第 '+(i+1)+' 站 '+stops[i].address,2500);return}
-  $('#tba').value=code; buzz(80); toast('识别到 '+code+'，请拍面单或填地址');
+  if(i>=0){showBox($('#scanbox'),'hit',hitHtml(i,' · 已录入'));buzz([60,60,60]);return}
+  $('#tba').value=code; $('#seq').value='';
+  showBox($('#scanbox'),'new','<div class="lbl">新包裹</div><div class="addr">'+esc(code)+'</div><div class="lbl">输入 Flex 序号，点加入</div>');
+  buzz(80); $('#seq').focus();
 });
 $('#stopScanBtn').onclick=stopScan;
+$('#seq').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('#addStop').click()}});
 
 // ③ 分拣扫码
 $('#startSort').onclick=()=>startScanner('reader2',code=>{
   const box=$('#sortbox'); const i=findByCode(code);
-  if(i<0){box.className='sortbox miss';box.innerHTML='<div class="num">?</div><div class="lbl">未录入</div><div class="addr">'+esc(code)+'</div>';buzz([200,100,200]);return}
-  const s=stops[i]; s.loaded=s.loaded||[]; if(!s.loaded.includes(code))s.loaded.push(code);
-  box.className='sortbox '+(ordered?'hit':'warn');
-  box.innerHTML='<div class="lbl">'+(ordered?'第':'（未优化顺序）第')+'</div><div class="num">'+(i+1)+'</div><div class="lbl">站 · 该站共 '+s.tba.length+' 件，已分拣 '+s.loaded.length+' 件</div><div class="addr">'+esc(s.address)+'</div>';
+  if(i<0){showBox(box,'miss','<div class="num">?</div><div class="lbl">未录入</div><div class="addr">'+esc(code)+'</div>');buzz([200,100,200]);return}
+  const s=stops[i]; if(!s.loaded.includes(code))s.loaded.push(code);
+  showBox(box,'hit',hitHtml(i,' · 该站 '+s.tba.length+' 件，已分拣 '+s.loaded.length+' 件'));
   buzz(120); save();
 });
 $('#stopSortBtn').onclick=stopScan;
-$('#resetSort').onclick=()=>{stops.forEach(s=>s.loaded=[]);save();$('#sortbox').className='sortbox';$('#sortbox').innerHTML='<div class="lbl">已重置</div>'};
+$('#resetSort').onclick=()=>{stops.forEach(s=>s.loaded=[]);save();showBox($('#sortbox'),'','<div class="lbl">已重置</div>')};
 function renderSort(){
-  const total=stops.reduce((n,s)=>n+s.tba.length,0), done=stops.reduce((n,s)=>n+(s.loaded||[]).length,0);
+  const total=stops.reduce((n,s)=>n+s.tba.length,0), done=stops.reduce((n,s)=>n+s.loaded.length,0);
   $('#sortBar').style.width=(total?done/total*100:0)+'%';
-  $('#sortProg').textContent='已分拣 '+done+' / '+total+' 件'+(ordered?'':' · 顺序尚未优化，先到「站点」页点「优化顺序」');
+  $('#sortProg').textContent='已分拣 '+done+' / '+total+' 件';
 }
 
 // ---------- OCR ----------
@@ -222,6 +242,7 @@ $('#ocrFile').addEventListener('change',async e=>{
     const text=data.text;
     const t=text.match(TBA); if(t&&!$('#tba').value)$('#tba').value=t[0].toUpperCase();
     const addr=extractAddress(text);
+    const win=text.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/); if(win&&!$('#note').value)$('#note').value='时段 '+win[1]+'-'+win[2];
     if(addr){$('#addr').value=addr;st.textContent='已识别地址，请核对。'}
     else{st.textContent='未能定位地址，请手动输入。OCR 原文：\n'+text.slice(0,300)}
   }catch(err){st.textContent='OCR 失败：'+err}
@@ -246,44 +267,75 @@ function extractAddress(text){
 }
 
 // ---------- add stop ----------
+const norm=a=>a.toLowerCase().replace(/[^a-z0-9]/g,'');
+function sortBySeq(){ // 有序号的按序号升序，没序号的排最后（保持原相对顺序）
+  const done=stops.filter(s=>s.status==='done'), pend=stops.filter(s=>s.status!=='done');
+  pend.sort((a,b)=>(a.seq==null)-(b.seq==null)||(a.seq!=null&&b.seq!=null?a.seq-b.seq:0));
+  stops=done.concat(pend);
+}
 $('#addStop').onclick=()=>{
+  const seqRaw=$('#seq').value.trim(), seq=seqRaw===''?null:parseInt(seqRaw,10);
   const tba=$('#tba').value.trim().toUpperCase(), addr=$('#addr').value.trim(), note=$('#note').value.trim();
-  if(!addr){toast('请填写地址');return}
-  const norm=a=>a.toLowerCase().replace(/[^a-z0-9]/g,'');
-  let s=stops.find(x=>norm(x.address)===norm(addr));
-  if(s){if(tba&&!s.tba.includes(tba))s.tba.push(tba);if(note)s.note=(s.note?s.note+'；':'')+note;toast('同地址合并，共 '+s.tba.length+' 件')}
-  else{stops.push({id:Date.now().toString(36),tba:tba?[tba]:[],address:addr,note,status:'pending',loaded:[]});ordered=false;toast('已加入第 '+stops.length+' 站')}
-  $('#tba').value='';$('#addr').value='';$('#note').value='';save();
+  if(!tba&&!addr){toast('请先扫码或填地址');return}
+  if(seqRaw!==''&&!(seq>=1)){toast('序号无效');return}
+  if(tba&&findByCode(tba)>=0){const i=findByCode(tba);showBox($('#scanbox'),'hit',hitHtml(i,' · 已录入过'));toast('这件已录入');return}
+  // 合并：同序号（Flex 同一站）或同地址
+  let s=null;
+  if(seq!=null)s=stops.find(x=>x.seq===seq&&x.status!=='done');
+  if(!s&&addr)s=stops.find(x=>x.address&&norm(x.address)===norm(addr));
+  if(s){
+    if(tba)s.tba.push(tba); if(addr&&!s.address)s.address=addr; if(seq!=null&&s.seq==null)s.seq=seq;
+    if(note)s.note=(s.note?s.note+'；':'')+note;
+    toast('并入第 '+numOf(stops.indexOf(s))+' 站，共 '+s.tba.length+' 件');
+  }else{
+    s={id:Date.now().toString(36),tba:tba?[tba]:[],address:addr,note,status:'pending',loaded:[],seq};
+    stops.push(s); if(seq==null)ordered=false;
+    toast(seq!=null?'已加入 Flex 第 '+seq+' 站':'已加入（无序号）');
+  }
+  if(seq!=null){sortBySeq();ordered=true}
+  showBox($('#scanbox'),'hit',hitHtml(stops.indexOf(s),' · 已保存'));
+  $('#seq').value='';$('#tba').value='';$('#addr').value='';$('#note').value='';save();
 };
 
 // ---------- list ----------
 function render(){
-  $('#count').textContent=stops.length+' 站 · '+stops.reduce((n,s)=>n+s.tba.length,0)+' 件 · '+stops.filter(s=>s.status==='done').length+' 已送';
+  const noaddr=stops.filter(s=>!s.address).length;
+  $('#count').textContent=stops.length+' 站 · '+stops.reduce((n,s)=>n+s.tba.length,0)+' 件 · '+stops.filter(s=>s.status==='done').length+' 已送'+(noaddr?' · '+noaddr+' 缺地址':'');
   const box=$('#stops');
   if(!stops.length){box.innerHTML='<p class="small">还没有站点，去「扫描」页添加。</p>'}
   else box.innerHTML=stops.map((s,i)=>`
-    <div class="stop ${s.status}">
-      <div class="n">${i+1}</div>
+    <div class="stop ${s.status}${s.address?'':' noaddr'}">
+      <div class="n">${numOf(i)}</div>
       <div class="body">
-        <div class="addr">${esc(s.address)}</div>
-        <div class="meta">${s.tba.length} 件${s.latlng?' · 📍':''} ${s.tba.map(esc).join(', ')} ${s.note?'· '+esc(s.note):''}</div>
+        <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址，点「编辑」补上'}</div>
+        <div class="meta">${s.seq!=null?'Flex #'+s.seq+' · ':''}${s.tba.length} 件${s.latlng?' · 📍':''} ${s.tba.map(esc).join(', ')} ${s.note?'· '+esc(s.note):''}</div>
         <div class="acts">
           <button class="btn" onclick="mv(${i},-1)">↑</button>
           <button class="btn" onclick="mv(${i},1)">↓</button>
           <button class="btn" onclick="edit(${i})">编辑</button>
           <button class="btn" onclick="toggle(${i})">${s.status==='done'?'撤销':'已送达'}</button>
-          <button class="btn" onclick="sendTesla(${i})">🚗 Tesla</button>
+          ${s.address?`<button class="btn" onclick="sendTesla(${i})">🚗 Tesla</button>`:''}
           <button class="btn" onclick="del(${i})">✕</button>
         </div>
       </div>
     </div>`).join('');
-  $('#optStatus').textContent=ordered?'✅ 顺序已优化':'顺序未优化（或加了新站点）';
+  $('#optStatus').textContent=ordered?'✅ 已排序':'顺序未排（点「按 Flex 序号排序」或「自动优化」）';
   renderExport(); renderDrive(); renderSort();
 }
 window.mv=(i,d)=>{const j=i+d;if(j<0||j>=stops.length)return;[stops[i],stops[j]]=[stops[j],stops[i]];save()};
 window.del=i=>{if(confirm('删除此站？')){stops.splice(i,1);save()}};
 window.toggle=i=>{stops[i].status=stops[i].status==='done'?'pending':'done';save()};
-window.edit=i=>{const a=prompt('地址',stops[i].address);if(a===null)return;const n=prompt('备注',stops[i].note||'');if(a.trim()!==stops[i].address){stops[i].latlng=null;ordered=false}stops[i].address=a.trim();stops[i].note=(n||'').trim();save()};
+window.edit=i=>{
+  const s=stops[i];
+  const q=prompt('Flex 序号（留空则无）',s.seq==null?'':s.seq); if(q===null)return;
+  const a=prompt('地址',s.address); if(a===null)return;
+  const n=prompt('备注',s.note||'');
+  const seq=q.trim()===''?null:parseInt(q,10);
+  if(a.trim()!==s.address){s.latlng=null}
+  s.seq=(seq>=1)?seq:null; s.address=a.trim(); s.note=(n||'').trim();
+  if(s.seq!=null)sortBySeq(); save();
+};
+$('#sortSeq').onclick=()=>{if(!stops.some(s=>s.seq!=null)){toast('还没有任何 Flex 序号');return}sortBySeq();ordered=true;save();toast('已按 Flex 序号排序')};
 $('#clearDone').onclick=()=>{stops=stops.filter(s=>s.status!=='done');save()};
 $('#clearAll').onclick=()=>{if(confirm('清空全部站点？')){stops=[];ordered=false;save()}};
 
@@ -292,8 +344,8 @@ const mapsUrl=a=>'https://www.google.com/maps/search/?api=1&query='+encodeURICom
 async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){prompt('复制：',t)}}
 window.copy=copy;
 window.sendTesla=async i=>{
-  const s=stops[i]; const url=mapsUrl(s.address);
-  if(navigator.share){try{await navigator.share({title:'第 '+(i+1)+' 站',text:s.address,url});toast('已分享，请在面板选 Tesla')}catch(e){}}
+  const s=stops[i]; if(!s.address){toast('该站缺地址');return} const url=mapsUrl(s.address);
+  if(navigator.share){try{await navigator.share({title:'第 '+numOf(i)+' 站',text:s.address,url});toast('已分享，请在面板选 Tesla')}catch(e){}}
   else{await copy(url);toast('已复制链接，粘贴到 Tesla App')}
 };
 
@@ -309,7 +361,7 @@ async function geocode(addr,key){
   const j=await r.json(); return j[0]?{lat:+j[0].lat,lng:+j[0].lon}:null;
 }
 const dist=(a,b)=>{const R=6371,dLat=(b.lat-a.lat)*Math.PI/180,dLng=(b.lng-a.lng)*Math.PI/180,x=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLng/2)**2;return 2*R*Math.asin(Math.sqrt(x))};
-function orderStops(start,list){ // nearest neighbour + 2-opt
+function orderStops(start,list){
   const left=list.slice(),route=[];let cur=start;
   while(left.length){let bi=0,bd=Infinity;left.forEach((s,i)=>{const d=dist(cur,s.latlng);if(d<bd){bd=d;bi=i}});cur=left[bi].latlng;route.push(left.splice(bi,1)[0])}
   const pt=i=>i<0?start:route[i].latlng;
@@ -323,8 +375,9 @@ function orderStops(start,list){ // nearest neighbour + 2-opt
   return route;
 }
 $('#optimize').onclick=async()=>{
-  const key=$('#apiKey').value.trim(); const pend=stops.filter(s=>s.status==='pending');
-  if(pend.length<2){toast('待送站点不足');return}
+  const key=$('#apiKey').value.trim(); const pend=stops.filter(s=>s.status==='pending'&&s.address);
+  if(pend.length<2){toast('有地址的待送站点不足');return}
+  if(!confirm('自动优化会覆盖 Flex 序号顺序（序号本身保留）。继续？'))return;
   const st=$('#optStatus');
   const need=pend.filter(s=>!s.latlng);
   for(let i=0;i<need.length;i++){
@@ -339,14 +392,15 @@ $('#optimize').onclick=async()=>{
   const start=pos||pend[0].latlng;
   const route=orderStops(start,pend);
   let km=0;for(let i=0;i<route.length;i++)km+=dist(i?route[i-1].latlng:start,route[i].latlng);
-  stops=stops.filter(s=>s.status==='done').concat(route); ordered=true; save();
+  const rest=stops.filter(s=>!route.includes(s));
+  stops=rest.filter(s=>s.status==='done').concat(route,rest.filter(s=>s.status!=='done')); ordered=true; save();
   toast('已优化 '+route.length+' 站，直线里程约 '+Math.round(km/1.609)+' mi'+(pos?'':'（未取到 GPS，从第 1 站起算）'),3000);
 };
 
 // ---------- export ----------
 function renderExport(){
-  const pend=stops.filter(s=>s.status==='pending').map(s=>s.address);
-  const box=$('#mapLinks'); if(!pend.length){box.innerHTML='<p class="small">无待送站点</p>';return}
+  const pend=stops.filter(s=>s.status==='pending'&&s.address).map(s=>s.address);
+  const box=$('#mapLinks'); if(!pend.length){box.innerHTML='<p class="small">无带地址的待送站点</p>';return}
   const chunks=[]; for(let i=0;i<pend.length;i+=10)chunks.push(pend.slice(i,i+10));
   box.innerHTML=chunks.map((c,k)=>{
     const dest=c[c.length-1], wps=c.slice(0,-1);
@@ -355,21 +409,21 @@ function renderExport(){
   }).join('');
 }
 const dl=(name,mime,txt)=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:mime}));a.download=name;a.click()};
-$('#dlCsv').onclick=()=>dl('flex-stops.csv','text/csv','name,address,packages,note\n'+stops.map((s,i)=>['Stop '+(i+1),s.address,s.tba.length,s.note||''].map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n'));
+$('#dlCsv').onclick=()=>dl('flex-stops.csv','text/csv','seq,address,packages,tba,note\n'+stops.map((s,i)=>[numOf(i),s.address,s.tba.length,s.tba.join(' '),s.note||''].map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n'));
 $('#dlKml').onclick=()=>dl('flex-stops.kml','application/vnd.google-earth.kml+xml',
   '<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Flex Stops</name>'+
-  stops.map((s,i)=>'<Placemark><name>Stop '+(i+1)+' ('+s.tba.length+')</name><address>'+esc(s.address)+'</address><description>'+esc(s.note||'')+'</description>'+(s.latlng?'<Point><coordinates>'+s.latlng.lng+','+s.latlng.lat+',0</coordinates></Point>':'')+'</Placemark>').join('')+
+  stops.filter(s=>s.address).map((s,i)=>'<Placemark><name>Stop '+numOf(stops.indexOf(s))+' ('+s.tba.length+')</name><address>'+esc(s.address)+'</address><description>'+esc(s.note||'')+'</description>'+(s.latlng?'<Point><coordinates>'+s.latlng.lng+','+s.latlng.lat+',0</coordinates></Point>':'')+'</Placemark>').join('')+
   '</Document></kml>');
-$('#copyAll').onclick=async()=>{await copy(stops.map((s,i)=>(i+1)+'. '+s.address).join('\n'));toast('已复制')};
+$('#copyAll').onclick=async()=>{await copy(stops.map((s,i)=>numOf(i)+'. '+(s.address||'（缺地址）')).join('\n'));toast('已复制')};
 
 // ---------- drive mode ----------
 function renderDrive(){
   const i=stops.findIndex(s=>s.status==='pending'); const box=$('#cur');
   if(i<0){box.innerHTML='<p>🎉 全部送达</p>';return}
   const s=stops[i];
-  box.innerHTML=`<div class="small">第 ${i+1} / ${stops.length} 站 · ${s.tba.length} 件</div>
-    <div class="addr">${esc(s.address)}</div><div class="small">${esc(s.note||'')}</div>
-    <button class="btn primary big" onclick="sendTesla(${i})">🚗 发送到 Tesla</button>
+  box.innerHTML=`<div class="small">${numLbl(i)}</div><div class="num">${numOf(i)}</div><div class="small">站 · ${s.tba.length} 件 · 剩 ${stops.filter(x=>x.status==='pending').length} 站</div>
+    <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址'}</div><div class="small">${esc(s.note||'')}</div>
+    ${s.address?`<button class="btn primary big" onclick="sendTesla(${i})">🚗 发送到 Tesla</button>`:`<button class="btn big" onclick="edit(${i})">✏️ 补地址</button>`}
     <button class="btn ok big" onclick="toggle(${i})">✅ 已送达，下一站</button>
     <button class="btn big" onclick="skip(${i})">⏭ 跳过（移到末尾）</button>`;
 }
