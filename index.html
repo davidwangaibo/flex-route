@@ -38,7 +38,7 @@
   .stop .acts{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
   .stop .acts .btn{padding:5px 8px;font-size:13px;border-radius:6px}
   .small{font-size:13px;color:var(--muted)}
-  .toast{position:fixed;top:12px;left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;z-index:9;opacity:0;transition:.2s;pointer-events:none;max-width:90vw}
+  .toast{position:fixed;bottom:calc(76px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:8px;font-size:14px;z-index:9;opacity:0;transition:.2s;pointer-events:none;max-width:90vw}
   .toast.show{opacity:1}
   .cur{text-align:center;padding:20px 8px}
   .cur .addr{font-size:24px;font-weight:700;margin:8px 0}
