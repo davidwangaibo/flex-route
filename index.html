@@ -53,14 +53,20 @@
   .sortbox.new{background:#dbeafe}
   .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:8px 0}
   .bar div{height:100%;background:var(--ok)}
+  .cand{display:block;width:100%;text-align:left;margin:4px 0;padding:10px}
+  .cand b{display:inline-block;min-width:44px;font-size:20px;color:var(--accent)}
+  .prow{display:flex;gap:6px;align-items:center;margin:4px 0}
+  .prow input.pseq{width:60px;font-size:18px;font-weight:700;text-align:center;padding:6px;flex-shrink:0}
+  .prow input.paddr{flex:1;padding:8px}
+  .prow .btn{padding:6px 8px;flex-shrink:0}
 </style>
 </head>
 <body>
 <header><h1>Flex Route → Tesla</h1><span class="small" id="count">0 站</span></header>
 <main>
 
-<!-- ① 扫描录入 -->
-<section class="tab active" id="tab-scan">
+<!-- ① 录入（备用：手动序号） -->
+<section class="tab" id="tab-scan">
   <div class="card">
     <div class="sortbox" id="scanbox"><div class="lbl">开始扫码后，对准面单上的 TBA 条码</div></div>
   </div>
@@ -70,14 +76,14 @@
       <button class="btn primary" id="startScan">开始扫码</button>
       <button class="btn" id="stopScanBtn">停止</button>
     </div>
-    <p class="small">取货时：Flex App 扫一下看到序号 → 这里扫一下，输入同样的序号，点加入。地址可以之后再补。已录入的包裹再扫会直接弹出序号。</p>
+    <p class="small">备用方式：手动录入序号。推荐用「站点」页导入 Flex 路线截图，然后直接去「分拣」页拍面单。</p>
   </div>
   <div class="card">
     <label>Flex 显示的序号（第几站）</label>
     <input id="seq" class="seq" inputmode="numeric" pattern="[0-9]*" placeholder="#">
     <label>运单号（扫码自动填入）</label>
     <input id="tba" placeholder="TBA…">
-    <label>地址（可选：拍面单 OCR，或手输，或之后在站点页补）</label>
+    <label>地址（可选）</label>
     <textarea id="addr" rows="2" placeholder="740 S Milliken Ave Unit C, Ontario CA 91761"></textarea>
     <label>备注</label>
     <input id="note" placeholder="送达时段 / 放门口 / 电话…">
@@ -89,11 +95,25 @@
   </div>
 </section>
 
-<!-- ② 站点 -->
-<section class="tab" id="tab-list">
+<!-- ② 站点 + 导入 -->
+<section class="tab active" id="tab-list">
+  <div class="card">
+    <h3 style="margin:0 0 6px">📥 导入 Flex 路线</h3>
+    <p class="small" style="margin:0 0 8px">Flex 取货扫完后，打开路线<b>列表</b>视图（不是地图），从上到下截屏，一次选中所有截图导入。识别结果可以修改后再确认。</p>
+    <label class="btn primary" style="cursor:pointer">🖼 选择截图（可多张）<input type="file" accept="image/*" multiple id="itinFiles" hidden></label>
+    <div class="small" id="itinStatus" style="margin-top:6px;white-space:pre-wrap"></div>
+    <div id="preview" hidden>
+      <div id="prows"></div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn" id="prowAdd">＋ 手动加一行</button>
+        <button class="btn ok" id="importOk">✅ 确认导入</button>
+        <button class="btn" id="importCancel">取消</button>
+      </div>
+    </div>
+  </div>
   <div class="card">
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn primary" id="sortSeq">🔢 按 Flex 序号排序</button>
+      <button class="btn" id="sortSeq">🔢 按序号排序</button>
       <button class="btn" id="optimize">🧭 自动优化顺序</button>
       <button class="btn" id="clearDone">清除已送达</button>
       <button class="btn" id="clearAll">清空</button>
@@ -109,18 +129,25 @@
 <!-- ③ 分拣 -->
 <section class="tab" id="tab-sort">
   <div class="card">
-    <div class="sortbox" id="sortbox"><div class="lbl">开始扫码后，对准包裹条码</div></div>
+    <div class="sortbox" id="sortbox"><div class="lbl">拍面单，或扫条码，或输门牌号</div></div>
+    <div id="cands"></div>
     <div class="bar"><div id="sortBar" style="width:0"></div></div>
     <div class="small" id="sortProg"></div>
   </div>
   <div class="card">
+    <label class="btn primary big" style="cursor:pointer;text-align:center">📷 拍面单 → 自动显示站号<input type="file" accept="image/*" capture="environment" id="sortPhoto" hidden></label>
+    <div class="small" id="sortOcr" style="margin-top:4px;white-space:pre-wrap"></div>
+    <label>或者输门牌号（前几位即可）</label>
+    <input id="houseNo" class="seq" inputmode="numeric" placeholder="740">
+  </div>
+  <div class="card">
     <div id="reader2" class="reader"></div>
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-      <button class="btn primary" id="startSort">开始分拣扫码</button>
+      <button class="btn" id="startSort">扫条码（已认识的包裹）</button>
       <button class="btn" id="stopSortBtn">停止</button>
       <button class="btn" id="resetSort">重置分拣记录</button>
     </div>
-    <p class="small">装车时再扫一次，屏幕大字显示序号。号码小的放上面/靠外。</p>
+    <p class="small">装车时逐件拍面单，屏幕大字显示第几站。号码大的放最下面。拍过一次的包裹，条码就认识了，之后扫码更快。</p>
   </div>
 </section>
 
@@ -148,10 +175,10 @@
 
 </main>
 <nav>
-  <button data-tab="scan" class="on">扫描</button>
-  <button data-tab="list">站点</button>
+  <button data-tab="list" class="on">站点</button>
   <button data-tab="sort">分拣</button>
   <button data-tab="drive">送达</button>
+  <button data-tab="scan">手动</button>
   <button data-tab="export">导出</button>
 </nav>
 <div class="toast" id="toast"></div>
@@ -160,7 +187,7 @@
 // ---------- state ----------
 const KEY='flexStops';
 let stops=[]; try{stops=JSON.parse(localStorage.getItem(KEY)||'[]')}catch(e){}
-stops.forEach(s=>{if(s.seq===undefined)s.seq=null;if(!s.loaded)s.loaded=[];if(!s.address)s.address=''});
+stops.forEach(s=>{if(s.seq===undefined)s.seq=null;if(!s.loaded)s.loaded=[];if(!s.address)s.address='';if(!s.tba)s.tba=[]});
 let ordered=false; try{ordered=localStorage.getItem('flexOrdered')==='1'}catch(e){}
 const $=s=>document.querySelector(s);
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(stops));localStorage.setItem('flexOrdered',ordered?'1':'0')}catch(e){} render()};
@@ -170,9 +197,8 @@ $('#apiKey').addEventListener('change',e=>{try{localStorage.setItem('gkey',e.tar
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TBA=/TBA[0-9A-Z]{10,}/i;
 const findByCode=code=>stops.findIndex(s=>s.tba.includes(code));
-// 显示用的站号：优先 Flex 序号，否则列表位置
 const numOf=i=>stops[i].seq!=null?stops[i].seq:(i+1);
-const numLbl=i=>stops[i].seq!=null?'Flex 第':'第';
+const numLbl=i=>stops[i].seq!=null?'第':'（未排序）第';
 const buzz=p=>{if(navigator.vibrate)navigator.vibrate(p)};
 
 // ---------- tabs ----------
@@ -189,70 +215,27 @@ async function startScanner(elId,onCode){
   if(scanner&&scannerEl===elId)return;
   await stopScan();
   try{
-    // No formatsToSupport restriction: auto-detect every symbology so we don't silently
-    // miss a label whose barcode isn't Code128/QR/DataMatrix/Code39.
     scanner=new Html5Qrcode(elId);
     scannerEl=elId;
-    // {ideal:'environment'} instead of a hard string: some iPhones (multiple rear cameras)
-    // throw OverconstrainedError on a strict facingMode and the scanner never opens.
     await scanner.start({facingMode:{ideal:'environment'}},{fps:10,qrbox:{width:280,height:160}},txt=>{
       const now=Date.now(); if(txt===lastCode&&now-lastAt<2500)return; lastCode=txt;lastAt=now;
-      buzz(50); // feedback that *something* was decoded, even before we know if it's a TBA code
       const m=txt.match(TBA);
-      // Fall back to the raw decoded text when it doesn't contain "TBA...": the printed label
-      // says TBA but some labels encode only the bare tracking digits in the barcode itself.
-      onCode((m?m[0]:txt.trim()).toUpperCase());
+      const code=m?m[0].toUpperCase():(/^\d{10,}$/.test(txt.trim())?txt.trim():null);
+      if(!code)return; // 面单上其他二维码忽略
+      buzz(50); onCode(code);
     });
   }catch(e){scanner=null;scannerEl='';toast('无法打开摄像头：'+e)}
 }
 async function stopScan(){if(!scanner)return;const s=scanner;scanner=null;scannerEl='';try{await s.stop();s.clear()}catch(e){}}
 
-// 大字框渲染
 function showBox(el,cls,html){el.className='sortbox '+cls;el.innerHTML=html}
 function hitHtml(i,extra){const s=stops[i];return '<div class="lbl">'+numLbl(i)+'</div><div class="num">'+numOf(i)+'</div><div class="lbl">站'+(extra||'')+'</div><div class="addr">'+(s.address?esc(s.address):'（缺地址）')+'</div>'}
 
-// ① 录入扫码
-$('#startScan').onclick=()=>startScanner('reader',code=>{
-  const i=findByCode(code);
-  if(i>=0){showBox($('#scanbox'),'hit',hitHtml(i,' · 已录入'));buzz([60,60,60]);return}
-  $('#tba').value=code; $('#seq').value='';
-  showBox($('#scanbox'),'new','<div class="lbl">新包裹</div><div class="addr">'+esc(code)+'</div><div class="lbl">输入 Flex 序号，点加入</div>');
-  buzz(80); $('#seq').focus();
-});
-$('#stopScanBtn').onclick=stopScan;
-$('#seq').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('#addStop').click()}});
-
-// ③ 分拣扫码
-$('#startSort').onclick=()=>startScanner('reader2',code=>{
-  const box=$('#sortbox'); const i=findByCode(code);
-  if(i<0){showBox(box,'miss','<div class="num">?</div><div class="lbl">未录入</div><div class="addr">'+esc(code)+'</div>');buzz([200,100,200]);return}
-  const s=stops[i]; if(!s.loaded.includes(code))s.loaded.push(code);
-  showBox(box,'hit',hitHtml(i,' · 该站 '+s.tba.length+' 件，已分拣 '+s.loaded.length+' 件'));
-  buzz(120); save();
-});
-$('#stopSortBtn').onclick=stopScan;
-$('#resetSort').onclick=()=>{stops.forEach(s=>s.loaded=[]);save();showBox($('#sortbox'),'','<div class="lbl">已重置</div>')};
-function renderSort(){
-  const total=stops.reduce((n,s)=>n+s.tba.length,0), done=stops.reduce((n,s)=>n+s.loaded.length,0);
-  $('#sortBar').style.width=(total?done/total*100:0)+'%';
-  $('#sortProg').textContent='已分拣 '+done+' / '+total+' 件';
+// ---------- OCR helper ----------
+async function ocr(file,onProgress){
+  const {data}=await Tesseract.recognize(file,'eng',{logger:m=>{if(m.status==='recognizing text'&&onProgress)onProgress(Math.round(m.progress*100))}});
+  return data.text;
 }
-
-// ---------- OCR ----------
-$('#ocrFile').addEventListener('change',async e=>{
-  const f=e.target.files[0]; if(!f)return;
-  const st=$('#ocrStatus'); st.textContent='OCR 识别中…';
-  try{
-    const {data}=await Tesseract.recognize(f,'eng',{logger:m=>{if(m.status==='recognizing text')st.textContent='OCR '+Math.round(m.progress*100)+'%'}});
-    const text=data.text;
-    const t=text.match(TBA); if(t&&!$('#tba').value)$('#tba').value=t[0].toUpperCase();
-    const addr=extractAddress(text);
-    const win=text.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/); if(win&&!$('#note').value)$('#note').value='时段 '+win[1]+'-'+win[2];
-    if(addr){$('#addr').value=addr;st.textContent='已识别地址，请核对。'}
-    else{st.textContent='未能定位地址，请手动输入。OCR 原文：\n'+text.slice(0,300)}
-  }catch(err){st.textContent='OCR 失败：'+err}
-  e.target.value='';
-});
 function extractAddress(text){
   const lines=text.split('\n').map(l=>l.trim()).filter(Boolean);
   const zipRe=/([A-Za-z .'-]+),?\s+([A-Z]{2})\s+(\d{5})(-\d{4})?/;
@@ -268,12 +251,157 @@ function extractAddress(text){
     }
     if(street.length)return street.join(' ')+', '+cityLine;
   }
-  return '';
+  // 没有邮编行：退而求其次，取第一行"门牌号 + 街道"
+  const l=lines.find(l=>/^\d+[A-Za-z]?\s+[A-Za-z]/.test(l)&&!/^\d{1,2}:\d{2}/.test(l));
+  return l||'';
 }
 
-// ---------- add stop ----------
-const norm=a=>a.toLowerCase().replace(/[^a-z0-9]/g,'');
-function sortBySeq(){ // 有序号的按序号升序，没序号的排最后（保持原相对顺序）
+// ---------- address matching ----------
+const ABBR={avenue:'ave',street:'st',road:'rd',drive:'dr',boulevard:'blvd',lane:'ln',court:'ct',place:'pl',circle:'cir',parkway:'pkwy',highway:'hwy',terrace:'ter',way:'way',north:'n',south:'s',east:'e',west:'w',apartment:'apt',suite:'ste',unit:'unit'};
+function normAddr(a){return a.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(Boolean).map(w=>ABBR[w]||w).join(' ')}
+function tokens(n){const num=(n.match(/^\d+/)||[''])[0];const words=n.split(' ').filter(w=>w!==num&&w.length>1&&!/^\d{5}$/.test(w));return {num,words}}
+// 返回 [{i,score}] 按分数降序。门牌号相同 +3，街道词重合按比例 0~2
+function matchStops(addr){
+  const q=tokens(normAddr(addr)); if(!q.num&&!q.words.length)return [];
+  return stops.map((s,i)=>{
+    if(!s.address||s.status==='done')return {i,score:0};
+    const t=tokens(normAddr(s.address)); let score=0;
+    if(q.num&&q.num===t.num)score+=3;
+    const inter=q.words.filter(w=>t.words.includes(w)).length;
+    score+=2*inter/Math.max(q.words.length,1);
+    return {i,score};
+  }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
+}
+
+// ---------- ② 导入 Flex 路线截图 ----------
+let previewRows=[];
+function parseItinerary(text){
+  const lines=text.split('\n').map(l=>l.replace(/[|_]/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+  const out=[]; let pendingSeq=null;
+  const streetRe=/^(?:(\d{1,3})[.):]?\s+)?(\d{1,6}[A-Za-z]?\s+[A-Za-z][A-Za-z0-9 .#'-]*)$/;
+  const cityRe=/^[A-Za-z .'-]+,?\s*[A-Z]{2}\b(\s+\d{5}(-\d{4})?)?/;
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i]; let m;
+    if((m=l.match(/^(\d{1,3})$/))){pendingSeq=+m[1];continue}
+    if(/^\d+\s*(packages?|items?|parcels?|stops?|pkgs?|个|件)\b/i.test(l))continue; // "2 packages" 之类的说明行
+    if((m=l.match(streetRe))&&/[A-Za-z]{2,}/.test(m[2])&&!/^\d{1,2}:\d{2}/.test(l)){
+      let addr=m[2].trim(); const seq=m[1]?+m[1]:pendingSeq; pendingSeq=null;
+      const nx=lines[i+1]||'';
+      if(cityRe.test(nx)&&!/^\d/.test(nx)){addr+=', '+nx;i++}
+      out.push({seq,address:addr});
+    }
+  }
+  return out;
+}
+$('#itinFiles').addEventListener('change',async e=>{
+  const files=[...e.target.files]; if(!files.length)return;
+  const st=$('#itinStatus'); let rows=[];
+  for(let k=0;k<files.length;k++){
+    st.textContent='识别截图 '+(k+1)+'/'+files.length+'…';
+    try{const text=await ocr(files[k],p=>{st.textContent='识别截图 '+(k+1)+'/'+files.length+'：'+p+'%'});rows=rows.concat(parseItinerary(text))}
+    catch(err){st.textContent='识别失败：'+err;return}
+  }
+  // 去重（截图有重叠），保持先后顺序
+  const seen=new Set(); rows=rows.filter(r=>{const k=normAddr(r.address);if(seen.has(k))return false;seen.add(k);return true});
+  // 没识别到序号的按出现顺序补号
+  let n=0; rows.forEach(r=>{n=r.seq!=null?r.seq:n+1;r.seq=n});
+  previewRows=rows; e.target.value='';
+  if(!rows.length){st.textContent='没识别到地址行。请确认是列表视图截图，或点「手动加一行」。';previewRows=[]}
+  else st.textContent='识别到 '+rows.length+' 站，请核对（可修改序号和地址）：';
+  renderPreview(); $('#preview').hidden=false;
+});
+function renderPreview(){
+  $('#prows').innerHTML=previewRows.map((r,k)=>`<div class="prow"><input class="pseq" inputmode="numeric" value="${r.seq}" onchange="previewRows[${k}].seq=parseInt(this.value)||0"><input class="paddr" value="${esc(r.address)}" onchange="previewRows[${k}].address=this.value"><button class="btn" onclick="previewRows.splice(${k},1);renderPreview()">✕</button></div>`).join('');
+}
+$('#prowAdd').onclick=()=>{previewRows.push({seq:(previewRows.length?Math.max(...previewRows.map(r=>r.seq))+1:1),address:''});renderPreview();$('#preview').hidden=false};
+$('#importCancel').onclick=()=>{previewRows=[];$('#preview').hidden=true;$('#itinStatus').textContent=''};
+$('#importOk').onclick=()=>{
+  const rows=previewRows.filter(r=>r.address.trim()); let added=0,updated=0;
+  rows.forEach(r=>{
+    const k=normAddr(r.address); let s=stops.find(x=>x.address&&normAddr(x.address)===k);
+    if(!s&&r.seq)s=stops.find(x=>x.seq===r.seq&&!x.address);
+    if(s){s.seq=r.seq;if(!s.address)s.address=r.address.trim();updated++}
+    else{stops.push({id:Date.now().toString(36)+added,tba:[],address:r.address.trim(),note:'',status:'pending',loaded:[],seq:r.seq});added++}
+  });
+  previewRows=[];$('#preview').hidden=true;$('#itinStatus').textContent='已导入：新增 '+added+' 站，更新 '+updated+' 站。';
+  sortBySeq();ordered=true;save();toast('导入完成，去「分拣」页拍面单');
+};
+
+// ---------- ③ 分拣：拍面单 / 门牌号 / 条码 ----------
+function markLoaded(i,code){const s=stops[i];const key=code||('p'+Date.now());if(code&&!s.tba.includes(code))s.tba.push(code);if(!s.loaded.includes(key))s.loaded.push(key);save()}
+function showHit(i,code,extra){
+  markLoaded(i,code); const s=stops[i];
+  showBox($('#sortbox'),'hit',hitHtml(i,' · '+(s.tba.length?'该站 '+s.tba.length+' 件，':'')+'已分拣 '+s.loaded.length+' 件'+(extra||'')));
+  $('#cands').innerHTML=''; buzz(120);
+}
+function showCandidates(list,code,title){
+  showBox($('#sortbox'),'warn','<div class="lbl">'+title+'</div>');
+  $('#cands').innerHTML=list.slice(0,4).map(x=>`<button class="btn cand" onclick="showHit(${x.i},${code?"'"+code+"'":'null'})"><b>${numOf(x.i)}</b> ${esc(stops[x.i].address)}</button>`).join('');
+}
+window.showHit=showHit;
+async function resolveByAddress(addr,code){
+  const m=matchStops(addr);
+  if(!m.length){showBox($('#sortbox'),'miss','<div class="num">?</div><div class="lbl">没有匹配的站点</div><div class="addr">'+esc(addr)+'</div>');$('#cands').innerHTML='';buzz([200,100,200]);return}
+  const best=m[0], second=m[1];
+  if(best.score>=3.5&&(!second||second.score<best.score-0.5)){showHit(best.i,code);return}
+  showCandidates(m,code,'请选择：'+esc(addr));
+}
+$('#sortPhoto').addEventListener('change',async e=>{
+  const f=e.target.files[0]; if(!f)return; const st=$('#sortOcr'); st.textContent='识别中…';
+  try{
+    const text=await ocr(f,p=>{st.textContent='识别 '+p+'%'});
+    const t=text.match(TBA); const code=t?t[0].toUpperCase():null;
+    if(code){const i=findByCode(code);if(i>=0){showHit(i,code);st.textContent='';e.target.value='';return}}
+    const addr=extractAddress(text);
+    if(!addr){st.textContent='没读到地址，请输门牌号。OCR 原文：\n'+text.slice(0,200);e.target.value='';return}
+    st.textContent='读到：'+addr; await resolveByAddress(addr,code);
+  }catch(err){st.textContent='识别失败：'+err}
+  e.target.value='';
+});
+$('#houseNo').addEventListener('input',e=>{
+  const v=e.target.value.trim(); if(!v){$('#cands').innerHTML='';return}
+  const list=stops.map((s,i)=>({i,s})).filter(x=>x.s.address&&x.s.status!=='done'&&normAddr(x.s.address).startsWith(v)).map(x=>({i:x.i,score:1}));
+  if(!list.length){$('#cands').innerHTML='<p class="small">没有以 '+esc(v)+' 开头的地址</p>';return}
+  if(list.length===1&&v.length>=3){showHit(list[0].i,null);e.target.value='';return}
+  showCandidates(list,null,'门牌号 '+esc(v)+'…');
+});
+$('#startSort').onclick=()=>startScanner('reader2',code=>{
+  const i=findByCode(code);
+  if(i<0){showBox($('#sortbox'),'miss','<div class="num">?</div><div class="lbl">这个条码还不认识，请拍面单</div><div class="addr">'+esc(code)+'</div>');$('#cands').innerHTML='';buzz([200,100,200]);return}
+  showHit(i,code);
+});
+$('#stopSortBtn').onclick=stopScan;
+$('#resetSort').onclick=()=>{stops.forEach(s=>s.loaded=[]);save();showBox($('#sortbox'),'','<div class="lbl">已重置</div>');$('#cands').innerHTML=''};
+function renderSort(){
+  const total=stops.length, done=stops.filter(s=>s.loaded.length).length, pk=stops.reduce((n,s)=>n+s.loaded.length,0);
+  $('#sortBar').style.width=(total?done/total*100:0)+'%';
+  $('#sortProg').textContent='已分拣 '+done+' / '+total+' 站，共 '+pk+' 件';
+}
+
+// ---------- ① 手动录入 ----------
+$('#startScan').onclick=()=>startScanner('reader',code=>{
+  const i=findByCode(code);
+  if(i>=0){showBox($('#scanbox'),'hit',hitHtml(i,' · 已录入'));buzz([60,60,60]);return}
+  $('#tba').value=code; $('#seq').value='';
+  showBox($('#scanbox'),'new','<div class="lbl">新包裹</div><div class="addr">'+esc(code)+'</div><div class="lbl">输入序号，点加入</div>');
+  buzz(80); $('#seq').focus();
+});
+$('#stopScanBtn').onclick=stopScan;
+$('#seq').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('#addStop').click()}});
+$('#ocrFile').addEventListener('change',async e=>{
+  const f=e.target.files[0]; if(!f)return;
+  const st=$('#ocrStatus'); st.textContent='OCR 识别中…';
+  try{
+    const text=await ocr(f,p=>{st.textContent='OCR '+p+'%'});
+    const t=text.match(TBA); if(t&&!$('#tba').value)$('#tba').value=t[0].toUpperCase();
+    const addr=extractAddress(text);
+    const win=text.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/); if(win&&!$('#note').value)$('#note').value='时段 '+win[1]+'-'+win[2];
+    if(addr){$('#addr').value=addr;st.textContent='已识别地址，请核对。'}
+    else{st.textContent='未能定位地址，请手动输入。OCR 原文：\n'+text.slice(0,300)}
+  }catch(err){st.textContent='OCR 失败：'+err}
+  e.target.value='';
+});
+function sortBySeq(){
   const done=stops.filter(s=>s.status==='done'), pend=stops.filter(s=>s.status!=='done');
   pend.sort((a,b)=>(a.seq==null)-(b.seq==null)||(a.seq!=null&&b.seq!=null?a.seq-b.seq:0));
   stops=done.concat(pend);
@@ -284,10 +412,9 @@ $('#addStop').onclick=()=>{
   if(!tba&&!addr){toast('请先扫码或填地址');return}
   if(seqRaw!==''&&!(seq>=1)){toast('序号无效');return}
   if(tba&&findByCode(tba)>=0){const i=findByCode(tba);showBox($('#scanbox'),'hit',hitHtml(i,' · 已录入过'));toast('这件已录入');return}
-  // 合并：同序号（Flex 同一站）或同地址
   let s=null;
   if(seq!=null)s=stops.find(x=>x.seq===seq&&x.status!=='done');
-  if(!s&&addr)s=stops.find(x=>x.address&&norm(x.address)===norm(addr));
+  if(!s&&addr)s=stops.find(x=>x.address&&normAddr(x.address)===normAddr(addr));
   if(s){
     if(tba)s.tba.push(tba); if(addr&&!s.address)s.address=addr; if(seq!=null&&s.seq==null)s.seq=seq;
     if(note)s.note=(s.note?s.note+'；':'')+note;
@@ -295,7 +422,7 @@ $('#addStop').onclick=()=>{
   }else{
     s={id:Date.now().toString(36),tba:tba?[tba]:[],address:addr,note,status:'pending',loaded:[],seq};
     stops.push(s); if(seq==null)ordered=false;
-    toast(seq!=null?'已加入 Flex 第 '+seq+' 站':'已加入（无序号）');
+    toast(seq!=null?'已加入第 '+seq+' 站':'已加入（无序号）');
   }
   if(seq!=null){sortBySeq();ordered=true}
   showBox($('#scanbox'),'hit',hitHtml(stops.indexOf(s),' · 已保存'));
@@ -305,15 +432,15 @@ $('#addStop').onclick=()=>{
 // ---------- list ----------
 function render(){
   const noaddr=stops.filter(s=>!s.address).length;
-  $('#count').textContent=stops.length+' 站 · '+stops.reduce((n,s)=>n+s.tba.length,0)+' 件 · '+stops.filter(s=>s.status==='done').length+' 已送'+(noaddr?' · '+noaddr+' 缺地址':'');
+  $('#count').textContent=stops.length+' 站 · '+stops.filter(s=>s.status==='done').length+' 已送'+(noaddr?' · '+noaddr+' 缺地址':'');
   const box=$('#stops');
-  if(!stops.length){box.innerHTML='<p class="small">还没有站点，去「扫描」页添加。</p>'}
+  if(!stops.length){box.innerHTML='<p class="small">还没有站点。导入 Flex 路线截图，或去「手动」页录入。</p>'}
   else box.innerHTML=stops.map((s,i)=>`
     <div class="stop ${s.status}${s.address?'':' noaddr'}">
       <div class="n">${numOf(i)}</div>
       <div class="body">
         <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址，点「编辑」补上'}</div>
-        <div class="meta">${s.seq!=null?'Flex #'+s.seq+' · ':''}${s.tba.length} 件${s.latlng?' · 📍':''} ${s.tba.map(esc).join(', ')} ${s.note?'· '+esc(s.note):''}</div>
+        <div class="meta">${s.loaded.length?'已分拣 '+s.loaded.length+' 件 · ':''}${s.tba.length?s.tba.map(esc).join(', ')+' ':''}${s.note?'· '+esc(s.note):''}</div>
         <div class="acts">
           <button class="btn" onclick="mv(${i},-1)">↑</button>
           <button class="btn" onclick="mv(${i},1)">↓</button>
@@ -324,7 +451,7 @@ function render(){
         </div>
       </div>
     </div>`).join('');
-  $('#optStatus').textContent=ordered?'✅ 已排序':'顺序未排（点「按 Flex 序号排序」或「自动优化」）';
+  $('#optStatus').textContent=ordered?'✅ 已排序':'顺序未排（点「按序号排序」或「自动优化」）';
   renderExport(); renderDrive(); renderSort();
 }
 window.mv=(i,d)=>{const j=i+d;if(j<0||j>=stops.length)return;[stops[i],stops[j]]=[stops[j],stops[i]];save()};
@@ -332,7 +459,7 @@ window.del=i=>{if(confirm('删除此站？')){stops.splice(i,1);save()}};
 window.toggle=i=>{stops[i].status=stops[i].status==='done'?'pending':'done';save()};
 window.edit=i=>{
   const s=stops[i];
-  const q=prompt('Flex 序号（留空则无）',s.seq==null?'':s.seq); if(q===null)return;
+  const q=prompt('序号（留空则无）',s.seq==null?'':s.seq); if(q===null)return;
   const a=prompt('地址',s.address); if(a===null)return;
   const n=prompt('备注',s.note||'');
   const seq=q.trim()===''?null:parseInt(q,10);
@@ -340,7 +467,7 @@ window.edit=i=>{
   s.seq=(seq>=1)?seq:null; s.address=a.trim(); s.note=(n||'').trim();
   if(s.seq!=null)sortBySeq(); save();
 };
-$('#sortSeq').onclick=()=>{if(!stops.some(s=>s.seq!=null)){toast('还没有任何 Flex 序号');return}sortBySeq();ordered=true;save();toast('已按 Flex 序号排序')};
+$('#sortSeq').onclick=()=>{if(!stops.some(s=>s.seq!=null)){toast('还没有任何序号');return}sortBySeq();ordered=true;save();toast('已按序号排序')};
 $('#clearDone').onclick=()=>{stops=stops.filter(s=>s.status!=='done');save()};
 $('#clearAll').onclick=()=>{if(confirm('清空全部站点？')){stops=[];ordered=false;save()}};
 
@@ -354,7 +481,7 @@ window.sendTesla=async i=>{
   else{await copy(url);toast('已复制链接，粘贴到 Tesla App')}
 };
 
-// ---------- geocode + local route optimization (no stop limit) ----------
+// ---------- geocode + local route optimization ----------
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function geocode(addr,key){
   if(key){
@@ -382,7 +509,7 @@ function orderStops(start,list){
 $('#optimize').onclick=async()=>{
   const key=$('#apiKey').value.trim(); const pend=stops.filter(s=>s.status==='pending'&&s.address);
   if(pend.length<2){toast('有地址的待送站点不足');return}
-  if(!confirm('自动优化会覆盖 Flex 序号顺序（序号本身保留）。继续？'))return;
+  if(!confirm('自动优化按直线距离重排，会覆盖 Flex 顺序（序号本身保留）。继续？'))return;
   const st=$('#optStatus');
   const need=pend.filter(s=>!s.latlng);
   for(let i=0;i<need.length;i++){
@@ -417,7 +544,7 @@ const dl=(name,mime,txt)=>{const a=document.createElement('a');a.href=URL.create
 $('#dlCsv').onclick=()=>dl('flex-stops.csv','text/csv','seq,address,packages,tba,note\n'+stops.map((s,i)=>[numOf(i),s.address,s.tba.length,s.tba.join(' '),s.note||''].map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n'));
 $('#dlKml').onclick=()=>dl('flex-stops.kml','application/vnd.google-earth.kml+xml',
   '<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Flex Stops</name>'+
-  stops.filter(s=>s.address).map((s,i)=>'<Placemark><name>Stop '+numOf(stops.indexOf(s))+' ('+s.tba.length+')</name><address>'+esc(s.address)+'</address><description>'+esc(s.note||'')+'</description>'+(s.latlng?'<Point><coordinates>'+s.latlng.lng+','+s.latlng.lat+',0</coordinates></Point>':'')+'</Placemark>').join('')+
+  stops.filter(s=>s.address).map(s=>'<Placemark><name>Stop '+numOf(stops.indexOf(s))+'</name><address>'+esc(s.address)+'</address><description>'+esc(s.note||'')+'</description>'+(s.latlng?'<Point><coordinates>'+s.latlng.lng+','+s.latlng.lat+',0</coordinates></Point>':'')+'</Placemark>').join('')+
   '</Document></kml>');
 $('#copyAll').onclick=async()=>{await copy(stops.map((s,i)=>numOf(i)+'. '+(s.address||'（缺地址）')).join('\n'));toast('已复制')};
 
@@ -426,7 +553,7 @@ function renderDrive(){
   const i=stops.findIndex(s=>s.status==='pending'); const box=$('#cur');
   if(i<0){box.innerHTML='<p>🎉 全部送达</p>';return}
   const s=stops[i];
-  box.innerHTML=`<div class="small">${numLbl(i)}</div><div class="num">${numOf(i)}</div><div class="small">站 · ${s.tba.length} 件 · 剩 ${stops.filter(x=>x.status==='pending').length} 站</div>
+  box.innerHTML=`<div class="small">${numLbl(i)}</div><div class="num">${numOf(i)}</div><div class="small">站 · 剩 ${stops.filter(x=>x.status==='pending').length} 站${s.loaded.length?' · '+s.loaded.length+' 件':''}</div>
     <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址'}</div><div class="small">${esc(s.note||'')}</div>
     ${s.address?`<button class="btn primary big" onclick="sendTesla(${i})">🚗 发送到 Tesla</button>`:`<button class="btn big" onclick="edit(${i})">✏️ 补地址</button>`}
     <button class="btn ok big" onclick="toggle(${i})">✅ 已送达，下一站</button>
