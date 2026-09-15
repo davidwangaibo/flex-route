@@ -275,23 +275,42 @@ function matchStops(addr){
 
 // ---------- ② 导入 Flex 路线截图 ----------
 let previewRows=[];
+// Flex 列表格式（每站）：
+//   ① 圆圈站号（OCR 不一定读得到）
+//   Next stop: / Deliver by the end of day / 10:00 AM - 3:00 PM   ← 时段说明
+//   410 Terry Ave. North                                          ← 街道
+//   Seattle  或  Ontario, CA 91761                                ← 城市（可能没有州、邮编）
+//   Deliver 2 packages                                            ← 件数
 function parseItinerary(text){
   const lines=text.split('\n').map(l=>l.replace(/[|_]/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
-  const out=[]; let pendingSeq=null;
+  const out=[]; let pendingSeq=null, pendingNote='';
   const streetRe=/^(?:(\d{1,3})[.):]?\s+)?(\d{1,6}[A-Za-z]?\s+[A-Za-z][A-Za-z0-9 .#'-]*)$/;
-  const cityRe=/^[A-Za-z .'-]+,?\s*[A-Z]{2}\b(\s+\d{5}(-\d{4})?)?/;
+  const cityStateRe=/^[A-Za-z .'-]+,?\s*[A-Z]{2}\b(\s+\d{5}(-\d{4})?)?$/;
+  const cityOnlyRe=/^[A-Za-z][A-Za-z .'-]{1,30}$/;
+  const captionRe=/^(next stop|deliver|by the end|after you|search by|itinerary|list$|map$|summary|start travel)/i;
+  const winRe=/(\d{1,2}(:\d{2})?\s*(am|pm)?\s*[-–]\s*\d{1,2}(:\d{2})?\s*(am|pm)?|end of (the )?day)/i;
+  const pkRe=/(?:deliver\s+)?(\d+)\s*(packages?|items?|parcels?|pkgs?|个包裹|件)/i;
   for(let i=0;i<lines.length;i++){
     const l=lines[i]; let m;
-    if((m=l.match(/^(\d{1,3})$/))){pendingSeq=+m[1];continue}
-    if(/^\d+\s*(packages?|items?|parcels?|stops?|pkgs?|个|件)\b/i.test(l))continue; // "2 packages" 之类的说明行
-    if((m=l.match(streetRe))&&/[A-Za-z]{2,}/.test(m[2])&&!/^\d{1,2}:\d{2}/.test(l)){
+    if((m=l.match(/^[(@©®]?\s*(\d{1,3})\s*[)]?$/))){pendingSeq=+m[1];continue}
+    if(pkRe.test(l)&&!streetRe.test(l))continue;
+    if(winRe.test(l)&&!streetRe.test(l)){pendingNote=l.replace(/^[(@©®]?\s*\d{1,3}\s*[)]?\s*/,'').replace(/^(next stop:?|deliver)\s*/i,'').trim();continue}
+    if((m=l.match(streetRe))&&/[A-Za-z]{2,}/.test(m[2])&&!/^\d{1,2}:\d{2}/.test(l)&&!pkRe.test(l)){
       let addr=m[2].trim(); const seq=m[1]?+m[1]:pendingSeq; pendingSeq=null;
       const nx=lines[i+1]||'';
-      if(cityRe.test(nx)&&!/^\d/.test(nx)){addr+=', '+nx;i++}
-      out.push({seq,address:addr});
+      if(cityStateRe.test(nx)&&!captionRe.test(nx)){addr+=', '+nx;i++}
+      else if(cityOnlyRe.test(nx)&&!captionRe.test(nx)&&!winRe.test(nx)){addr+=', '+nx;i++}
+      let pk=null; for(let k=1;k<=2;k++){const q=(lines[i+k]||'').match(pkRe);if(q){pk=+q[1];break}}
+      out.push({seq,address:addr,note:pendingNote,pk}); pendingNote='';
     }
   }
   return out;
+}
+// 多张截图合并：去重（截图有重叠），OCR 读到的站号只在"合理递增"时采用，否则按出现顺序编号
+function finalizeRows(rows){
+  const seen=new Set(); rows=rows.filter(r=>{const k=normAddr(r.address);if(seen.has(k))return false;seen.add(k);return true});
+  let n=0; rows.forEach(r=>{n=(r.seq!=null&&r.seq>n&&r.seq<=n+5)?r.seq:n+1;r.seq=n});
+  return rows;
 }
 $('#itinFiles').addEventListener('change',async e=>{
   const files=[...e.target.files]; if(!files.length)return;
@@ -301,10 +320,7 @@ $('#itinFiles').addEventListener('change',async e=>{
     try{const text=await ocr(files[k],p=>{st.textContent='识别截图 '+(k+1)+'/'+files.length+'：'+p+'%'});rows=rows.concat(parseItinerary(text))}
     catch(err){st.textContent='识别失败：'+err;return}
   }
-  // 去重（截图有重叠），保持先后顺序
-  const seen=new Set(); rows=rows.filter(r=>{const k=normAddr(r.address);if(seen.has(k))return false;seen.add(k);return true});
-  // 没识别到序号的按出现顺序补号
-  let n=0; rows.forEach(r=>{n=r.seq!=null?r.seq:n+1;r.seq=n});
+  rows=finalizeRows(rows);
   previewRows=rows; e.target.value='';
   if(!rows.length){st.textContent='没识别到地址行。请确认是列表视图截图，或点「手动加一行」。';previewRows=[]}
   else st.textContent='识别到 '+rows.length+' 站，请核对（可修改序号和地址）：';
@@ -320,8 +336,8 @@ $('#importOk').onclick=()=>{
   rows.forEach(r=>{
     const k=normAddr(r.address); let s=stops.find(x=>x.address&&normAddr(x.address)===k);
     if(!s&&r.seq)s=stops.find(x=>x.seq===r.seq&&!x.address);
-    if(s){s.seq=r.seq;if(!s.address)s.address=r.address.trim();updated++}
-    else{stops.push({id:Date.now().toString(36)+added,tba:[],address:r.address.trim(),note:'',status:'pending',loaded:[],seq:r.seq});added++}
+    if(s){s.seq=r.seq;if(!s.address)s.address=r.address.trim();if(r.pk)s.pk=r.pk;if(r.note&&!s.note)s.note=r.note;updated++}
+    else{stops.push({id:Date.now().toString(36)+added,tba:[],address:r.address.trim(),note:r.note||'',pk:r.pk||null,status:'pending',loaded:[],seq:r.seq});added++}
   });
   previewRows=[];$('#preview').hidden=true;$('#itinStatus').textContent='已导入：新增 '+added+' 站，更新 '+updated+' 站。';
   sortBySeq();ordered=true;save();toast('导入完成，去「分拣」页拍面单');
@@ -331,7 +347,8 @@ $('#importOk').onclick=()=>{
 function markLoaded(i,code){const s=stops[i];const key=code||('p'+Date.now());if(code&&!s.tba.includes(code))s.tba.push(code);if(!s.loaded.includes(key))s.loaded.push(key);save()}
 function showHit(i,code,extra){
   markLoaded(i,code); const s=stops[i];
-  showBox($('#sortbox'),'hit',hitHtml(i,' · '+(s.tba.length?'该站 '+s.tba.length+' 件，':'')+'已分拣 '+s.loaded.length+' 件'+(extra||'')));
+  const pk=s.pk||s.tba.length;
+  showBox($('#sortbox'),'hit',hitHtml(i,' · '+(pk?'该站 '+pk+' 件，':'')+'已分拣 '+s.loaded.length+' 件'+(extra||'')));
   $('#cands').innerHTML=''; buzz(120);
 }
 function showCandidates(list,code,title){
