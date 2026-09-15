@@ -283,28 +283,40 @@ let previewRows=[];
 //   Deliver 2 packages                                            ← 件数
 function parseItinerary(text){
   const lines=text.split('\n').map(l=>l.replace(/[|_]/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
-  const out=[]; let pendingSeq=null, pendingNote='';
+  const out=[]; let pendingSeq=null, pendingNote='', pendingDone=false;
   const streetRe=/^(?:(\d{1,3})[.):]?\s+)?(\d{1,6}[A-Za-z]?\s+[A-Za-z][A-Za-z0-9 .#'-]*)$/;
   const cityStateRe=/^[A-Za-z .'-]+,?\s*[A-Z]{2}\b(\s+\d{5}(-\d{4})?)?$/;
   const cityOnlyRe=/^[A-Za-z][A-Za-z .'-]{1,30}$/;
-  const captionRe=/^(next stop|deliver|by the end|after you|search by|itinerary|list$|map$|summary|start travel)/i;
+  const captionRe=/^(next stop|current stop|deliver|by the end|after you|search by|itinerary|list$|map$|summary|start travel|late$)/i;
   const winRe=/(\d{1,2}(:\d{2})?\s*(am|pm)?\s*[-–]\s*\d{1,2}(:\d{2})?\s*(am|pm)?|end of (the )?day)/i;
   const pkRe=/(?:deliver\s+)?(\d+)\s*(packages?|items?|parcels?|pkgs?|个包裹|件)/i;
+  const cleanNote=l=>l.replace(/^.*[•·»«+*]\s*/,'').replace(/^[(\[]\s*/,'').replace(/^[(@©®]?\s*\d{1,3}\s*[)]?\s*/,'').replace(/^(next stop:?|deliver)\s*/i,'').replace(/\s+[A-Z]$/,'').trim();
   for(let i=0;i<lines.length;i++){
     const l=lines[i]; let m;
     if((m=l.match(/^[(@©®]?\s*(\d{1,3})\s*[)]?$/))){pendingSeq=+m[1];continue}
+    if(/delivered at/i.test(l)){pendingDone=true;continue}                     // "# E-7.3C • Delivered at 18:26"
     if(pkRe.test(l)&&!streetRe.test(l))continue;
-    if(winRe.test(l)&&!streetRe.test(l)){pendingNote=l.replace(/^[(@©®]?\s*\d{1,3}\s*[)]?\s*/,'').replace(/^(next stop:?|deliver)\s*/i,'').trim();continue}
+    if(winRe.test(l)&&!streetRe.test(l)){pendingNote=cleanNote(l);continue}     // "Scheduled 0:00 - 23:59" / "By the end of the day"
     if((m=l.match(streetRe))&&/[A-Za-z]{2,}/.test(m[2])&&!/^\d{1,2}:\d{2}/.test(l)&&!pkRe.test(l)){
       let addr=m[2].trim(); const seq=m[1]?+m[1]:pendingSeq; pendingSeq=null;
-      const nx=lines[i+1]||'';
+      const nx=(lines[i+1]||'').replace(/\s+late$/i,'');
       if(cityStateRe.test(nx)&&!captionRe.test(nx)){addr+=', '+nx;i++}
       else if(cityOnlyRe.test(nx)&&!captionRe.test(nx)&&!winRe.test(nx)){addr+=', '+nx;i++}
       let pk=null; for(let k=1;k<=2;k++){const q=(lines[i+k]||'').match(pkRe);if(q){pk=+q[1];break}}
-      out.push({seq,address:addr,note:pendingNote,pk}); pendingNote='';
+      out.push({seq,address:addr,note:pendingNote,pk,done:pendingDone}); pendingNote='';pendingDone=false;
     }
   }
   return out;
+}
+// 小图（如从聊天里转存的截图）放大到 1400 宽再识别，OCR 对小字很敏感
+function prepImage(file){
+  return new Promise(res=>{
+    const img=new Image(); const url=URL.createObjectURL(file);
+    img.onload=()=>{URL.revokeObjectURL(url); if(img.width>=1200)return res(file);
+      const k=1400/img.width, c=document.createElement('canvas'); c.width=1400; c.height=Math.round(img.height*k);
+      const ctx=c.getContext('2d'); ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high'; ctx.drawImage(img,0,0,c.width,c.height); res(c)};
+    img.onerror=()=>{URL.revokeObjectURL(url);res(file)}; img.src=url;
+  });
 }
 // 多张截图合并：去重（截图有重叠），OCR 读到的站号只在"合理递增"时采用，否则按出现顺序编号
 function finalizeRows(rows){
@@ -317,7 +329,7 @@ $('#itinFiles').addEventListener('change',async e=>{
   const st=$('#itinStatus'); let rows=[];
   for(let k=0;k<files.length;k++){
     st.textContent='识别截图 '+(k+1)+'/'+files.length+'…';
-    try{const text=await ocr(files[k],p=>{st.textContent='识别截图 '+(k+1)+'/'+files.length+'：'+p+'%'});rows=rows.concat(parseItinerary(text))}
+    try{const src=await prepImage(files[k]);const text=await ocr(src,p=>{st.textContent='识别截图 '+(k+1)+'/'+files.length+'：'+p+'%'});rows=rows.concat(parseItinerary(text))}
     catch(err){st.textContent='识别失败：'+err;return}
   }
   rows=finalizeRows(rows);
@@ -336,8 +348,8 @@ $('#importOk').onclick=()=>{
   rows.forEach(r=>{
     const k=normAddr(r.address); let s=stops.find(x=>x.address&&normAddr(x.address)===k);
     if(!s&&r.seq)s=stops.find(x=>x.seq===r.seq&&!x.address);
-    if(s){s.seq=r.seq;if(!s.address)s.address=r.address.trim();if(r.pk)s.pk=r.pk;if(r.note&&!s.note)s.note=r.note;updated++}
-    else{stops.push({id:Date.now().toString(36)+added,tba:[],address:r.address.trim(),note:r.note||'',pk:r.pk||null,status:'pending',loaded:[],seq:r.seq});added++}
+    if(s){s.seq=r.seq;if(!s.address)s.address=r.address.trim();if(r.pk)s.pk=r.pk;if(r.note&&!s.note)s.note=r.note;if(r.done)s.status='done';updated++}
+    else{stops.push({id:Date.now().toString(36)+added,tba:[],address:r.address.trim(),note:r.note||'',pk:r.pk||null,status:r.done?'done':'pending',loaded:[],seq:r.seq});added++}
   });
   previewRows=[];$('#preview').hidden=true;$('#itinStatus').textContent='已导入：新增 '+added+' 站，更新 '+updated+' 站。';
   sortBySeq();ordered=true;save();toast('导入完成，去「分拣」页拍面单');
