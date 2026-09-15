@@ -188,15 +188,20 @@ let scanner=null,scannerEl='',lastCode='',lastAt=0;
 async function startScanner(elId,onCode){
   if(scanner&&scannerEl===elId)return;
   await stopScan();
-  scanner=new Html5Qrcode(elId,{formatsToSupport:[
-    Html5QrcodeSupportedFormats.CODE_128,Html5QrcodeSupportedFormats.QR_CODE,
-    Html5QrcodeSupportedFormats.DATA_MATRIX,Html5QrcodeSupportedFormats.CODE_39]});
-  scannerEl=elId;
   try{
-    await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:280,height:160}},txt=>{
+    // No formatsToSupport restriction: auto-detect every symbology so we don't silently
+    // miss a label whose barcode isn't Code128/QR/DataMatrix/Code39.
+    scanner=new Html5Qrcode(elId);
+    scannerEl=elId;
+    // {ideal:'environment'} instead of a hard string: some iPhones (multiple rear cameras)
+    // throw OverconstrainedError on a strict facingMode and the scanner never opens.
+    await scanner.start({facingMode:{ideal:'environment'}},{fps:10,qrbox:{width:280,height:160}},txt=>{
       const now=Date.now(); if(txt===lastCode&&now-lastAt<2500)return; lastCode=txt;lastAt=now;
-      const m=txt.match(TBA); if(!m)return; // 面单上有多个码，只认 TBA
-      onCode(m[0].toUpperCase());
+      buzz(50); // feedback that *something* was decoded, even before we know if it's a TBA code
+      const m=txt.match(TBA);
+      // Fall back to the raw decoded text when it doesn't contain "TBA...": the printed label
+      // says TBA but some labels encode only the bare tracking digits in the barcode itself.
+      onCode((m?m[0]:txt.trim()).toUpperCase());
     });
   }catch(e){scanner=null;scannerEl='';toast('无法打开摄像头：'+e)}
 }
