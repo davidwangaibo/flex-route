@@ -62,6 +62,13 @@
   .prow.unsure input.pseq{background:#fef3c7;border-color:var(--warn)}
   .prow.dup input.pseq{background:#fee2e2;border-color:var(--accent)}
   #houseNo{margin-top:8px}
+  .sortbox .zone{font-size:28px;font-weight:800;margin-top:6px;color:#1e3a8a}
+  .cur .zone{font-size:22px;font-weight:800;color:#1e3a8a;margin:4px 0}
+  #zoneText{font-size:15px;line-height:1.5}
+  .zsum{margin:6px 0 0;padding:0;list-style:none;font-size:14px}
+  .zsum li{padding:3px 0;border-bottom:1px solid var(--line)}
+  .zsum b{display:inline-block;min-width:8em}
+  .autoTip{font-size:14px;text-align:center;padding:6px;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -137,6 +144,8 @@
     <div id="cands"></div>
     <div class="bar"><div id="sortBar" style="width:0"></div></div>
     <div class="small" id="sortProg"></div>
+    <div class="small" id="sortLeft" style="margin-top:4px"></div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:14px;color:var(--fg)"><input type="checkbox" id="speakOn" style="width:auto;margin:0"> 🔊 读出站号（装车不用看屏幕）</label>
   </div>
   <div class="card">
     <label class="btn primary big" style="cursor:pointer;text-align:center">📷 拍面单 → 自动显示站号<input type="file" accept="image/*" capture="environment" id="sortPhoto" hidden></label>
@@ -144,12 +153,25 @@
   </div>
   <div class="card">
     <div id="reader2" class="reader"></div>
+    <div class="autoTip" id="autoTip"></div>
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-      <button class="btn" id="startSort">扫条码（已认识的包裹）</button>
+      <button class="btn primary" id="startSort">🎥 自动识别（对准面单停一下）</button>
       <button class="btn" id="stopSortBtn">停止</button>
       <button class="btn" id="resetSort">重置分拣记录</button>
     </div>
-    <p class="small">装车时逐件拍面单，屏幕大字显示第几站。号码大的放最下面。拍过一次的包裹，条码就认识了，之后扫码更快。</p>
+    <p class="small">摄像头一直开着：面单对准镜头停稳约 1 秒，自动读条码和地址、报站号；拿开换下一件即可，不用按拍照。光线暗时效果差，可改用上面的拍照。</p>
+  </div>
+  <div class="card">
+    <details id="zoneBox"><summary><b>🚗 车内分区（2021 Model Y）</b> <span class="small" id="zoneState"></span></summary>
+      <label style="display:flex;align-items:center;gap:6px;margin:8px 0;font-size:14px;color:var(--fg)"><input type="checkbox" id="zonesOn" style="width:auto;margin:0"> 分拣时显示并读出放哪里</label>
+      <label>按送货先后排，一行一个位置；* 后面是容量（大约能放多少，按比例分配）</label>
+      <textarea id="zoneText" rows="7"></textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <button class="btn" id="zoneSeatsUp">后座不放倒</button>
+        <button class="btn" id="zoneSeatsDown">后座放倒</button>
+      </div>
+      <ul class="zsum" id="zoneSum"></ul>
+    </details>
   </div>
 </section>
 
@@ -213,20 +235,23 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
 
 // ---------- scanner (shared) ----------
 let scanner=null,scannerEl='',lastCode='',lastAt=0;
-async function startScanner(elId,onCode){
-  if(scanner&&scannerEl===elId)return;
+async function startScanner(elId,onCode,hd){
+  if(scanner&&scannerEl===elId)return true;
   await stopScan();
   try{
     scanner=new Html5Qrcode(elId);
     scannerEl=elId;
-    await scanner.start({facingMode:{ideal:'environment'}},{fps:10,qrbox:{width:280,height:160}},txt=>{
+    const cfg={fps:10,qrbox:{width:280,height:160}};
+    if(hd)cfg.videoConstraints={facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}};
+    await scanner.start({facingMode:{ideal:'environment'}},cfg,txt=>{
       const now=Date.now(); if(txt===lastCode&&now-lastAt<2500)return; lastCode=txt;lastAt=now;
       const m=txt.match(TBA);
       const code=m?m[0].toUpperCase():(/^\d{10,}$/.test(txt.trim())?txt.trim():null);
       if(!code)return; // 面单上其他二维码忽略
       buzz(50); onCode(code);
     });
-  }catch(e){scanner=null;scannerEl='';toast('无法打开摄像头：'+e)}
+    return true;
+  }catch(e){scanner=null;scannerEl='';toast('无法打开摄像头：'+e);return false}
 }
 async function stopScan(){if(!scanner)return;const s=scanner;scanner=null;scannerEl='';try{await s.stop();s.clear()}catch(e){}}
 
@@ -416,7 +441,7 @@ function mergeShots(shots){
   const seen=new Map(), out=[];
   shots.forEach(sh=>sh.rows.forEach(r=>{
     const a=normAddr(r.address), prev=seen.get(a);
-    const row={seq:r.seq,address:r.address,note:r.note,pk:r.pk,done:r.done,unsure:!!sh.guess||sh.support<1};
+    const row={seq:r.seq,address:r.address,note:r.note,pk:r.pk,done:r.done,unsure:!!sh.guess||sh.support<1,shot:sh.n};
     if(prev){if(prev.unsure&&!row.unsure)Object.assign(prev,row);return}
     seen.set(a,row); out.push(row);
   }));
@@ -454,8 +479,14 @@ $('#itinFiles').addEventListener('change',async e=>{
   renderPreview(); $('#preview').hidden=false;
 });
 function renderPreview(){
-  $('#prows').innerHTML=previewRows.map((r,k)=>`<div class="prow${r.dup?' dup':r.unsure?' unsure':''}"><input class="pseq" inputmode="numeric" value="${r.seq==null?'':r.seq}" onchange="previewRows[${k}].seq=parseInt(this.value)||0;previewRows[${k}].unsure=false;markDup()"><input class="paddr" value="${esc(r.address)}" onchange="previewRows[${k}].address=this.value"><button class="btn" onclick="previewRows.splice(${k},1);markDup()">✕</button></div>`).join('');
+  $('#prows').innerHTML=previewRows.map((r,k)=>`<div class="prow${r.dup?' dup':r.unsure?' unsure':''}"><input class="pseq" inputmode="numeric" value="${r.seq==null?'':r.seq}" onchange="setSeq(${k},this.value)"><input class="paddr" value="${esc(r.address)}" onchange="previewRows[${k}].address=this.value"><button class="btn" onclick="previewRows.splice(${k},1);markDup()">✕</button></div>`).join('');
 }
+// 改一个标黄（推算）的站号，同一张截图的其他站一起平移，不用逐个改
+window.setSeq=(k,v)=>{
+  const r=previewRows[k], n=parseInt(v,10)||0, d=n-(r.seq||0); if(!d)return;
+  if(r.unsure&&r.shot!=null)previewRows.forEach(x=>{if(x.shot===r.shot&&x.unsure&&x!==r){x.seq+=d;x.unsure=false}});
+  r.seq=n; r.unsure=false; previewRows.sort((a,b)=>(a.seq||0)-(b.seq||0)); markDup();
+};
 window.markDup=()=>{const c={};previewRows.forEach(r=>c[r.seq]=(c[r.seq]||0)+1);previewRows.forEach(r=>r.dup=c[r.seq]>1);renderPreview()};
 $('#prowAdd').onclick=()=>{previewRows.push({seq:(previewRows.length?Math.max(...previewRows.map(r=>r.seq||0))+1:1),address:''});renderPreview();$('#preview').hidden=false};
 $('#importCancel').onclick=()=>{previewRows=[];$('#preview').hidden=true;$('#itinStatus').textContent=''};
@@ -478,8 +509,10 @@ function markLoaded(i,code){const s=stops[i];const key=code||('p'+Date.now());if
 function showHit(i,code,extra){
   markLoaded(i,code); const s=stops[i];
   const pk=s.pk||s.tba.length;
-  showBox($('#sortbox'),'hit',hitHtml(i,' · '+(pk?'该站 '+pk+' 件，':'')+'已分拣 '+s.loaded.length+' 件'+(extra||'')));
+  const z=zonesOn?zoneOf(i):'';
+  showBox($('#sortbox'),'hit',hitHtml(i,' · '+(pk?'该站 '+pk+' 件，':'')+'已分拣 '+s.loaded.length+' 件'+(extra||''))+(z?'<div class="zone">📦 '+esc(z)+'</div>':''));
   $('#cands').innerHTML=''; $('#houseNo').value=''; $('#houseNo').blur(); buzz(120);
+  speak(numOf(i)+' 号'+(pk>1?'，'+pk+' 件':'')+(z?'，'+z.replace(/[（(].*?[)）]/g,''):''));
   $('#sortbox').scrollIntoView({block:'nearest',behavior:'smooth'});
 }
 function showCandidates(list,code,title,max){
@@ -495,10 +528,24 @@ async function resolveByAddress(addr,code){
   if(best.num===2&&best.street>0&&(!second||second.score<best.score-1)){showHit(best.i,code);return}
   showCandidates(m,code,'请选择：'+esc(addr));
 }
+// 手机相机照片 1200 万像素，直接识别要十几秒；缩到长边 1800 并转灰度，快好几倍，对面单大字准确率不受影响
+function prepLabel(file){
+  return new Promise(res=>{
+    const img=new Image(), url=URL.createObjectURL(file);
+    img.onload=()=>{URL.revokeObjectURL(url);
+      const k=Math.min(1,1800/Math.max(img.width,img.height)), c=document.createElement('canvas');
+      c.width=Math.round(img.width*k); c.height=Math.round(img.height*k);
+      const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0,c.width,c.height);
+      const id=ctx.getImageData(0,0,c.width,c.height), d=id.data;
+      for(let o=0;o<d.length;o+=4){let v=0.299*d[o]+0.587*d[o+1]+0.114*d[o+2];v=v<110?Math.max(0,v*0.7):Math.min(255,v*1.15);d[o]=d[o+1]=d[o+2]=v}
+      ctx.putImageData(id,0,0); res(c)};
+    img.onerror=()=>{URL.revokeObjectURL(url);res(file)}; img.src=url;
+  });
+}
 $('#sortPhoto').addEventListener('change',async e=>{
   const f=e.target.files[0]; if(!f)return; const st=$('#sortOcr'); st.textContent='识别中…';
   try{
-    const text=await ocr(f,p=>{st.textContent='识别 '+p+'%'});
+    const text=await ocr(await prepLabel(f),p=>{st.textContent='识别 '+p+'%'});
     const t=text.match(TBA); const code=t?t[0].toUpperCase():null;
     if(code){const i=findByCode(code);if(i>=0){showHit(i,code);st.textContent='';e.target.value='';return}}
     const addr=extractAddress(text);
@@ -523,17 +570,107 @@ function houseLookup(raw,commit){
 }
 $('#houseNo').addEventListener('input',e=>houseLookup(e.target.value,false));
 $('#houseNo').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();houseLookup(e.target.value,true)}});
-$('#startSort').onclick=()=>startScanner('reader2',code=>{
-  const i=findByCode(code);
-  if(i<0){showBox($('#sortbox'),'miss','<div class="num">?</div><div class="lbl">这个条码还不认识，请拍面单</div><div class="addr">'+esc(code)+'</div>');$('#cands').innerHTML='';buzz([200,100,200]);return}
-  showHit(i,code);
-});
-$('#stopSortBtn').onclick=stopScan;
+// ---------- 自动识别：摄像头常开，画面静止就 OCR 一次，拿开换下一件 ----------
+// 条码认识就直接出结果；不认识就读面单文字。每个"静止画面"只识别一次，避免同一件重复计数。
+let autoBusy=false,autoTimer=null,autoPrev=null,autoStill=0,autoLock=null,autoLast={i:-1,t:0};
+const autoTip=t=>{$('#autoTip').textContent=t||''};
+function thumb(v){ // 32×24 灰度缩略图，用来判断画面是否静止/是否换了包裹
+  const c=thumb.c||(thumb.c=document.createElement('canvas')); c.width=32;c.height=24;
+  const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(v,0,0,32,24);
+  const d=x.getImageData(0,0,32,24).data, g=new Uint8Array(768); for(let k=0;k<768;k++)g[k]=(d[k*4]+d[k*4+1]+d[k*4+2])/3; return g;
+}
+const tdiff=(a,b)=>{if(!a||!b)return 255;let s=0;for(let k=0;k<a.length;k++)s+=Math.abs(a[k]-b[k]);return s/a.length};
+function frameCanvas(v){
+  const k=Math.min(1,1600/Math.max(v.videoWidth,v.videoHeight)), c=document.createElement('canvas');
+  c.width=Math.round(v.videoWidth*k); c.height=Math.round(v.videoHeight*k);
+  const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(v,0,0,c.width,c.height);
+  const id=x.getImageData(0,0,c.width,c.height),d=id.data;
+  for(let o=0;o<d.length;o+=4){let g=0.299*d[o]+0.587*d[o+1]+0.114*d[o+2];g=g<110?g*0.7:Math.min(255,g*1.15);d[o]=d[o+1]=d[o+2]=g}
+  x.putImageData(id,0,0); return c;
+}
+function autoHit(i,code){
+  const now=Date.now();
+  // 同一站 6 秒内又被读到、又没有新条码：多半是同一件没拿开，只显示不计数
+  if(!code&&autoLast.i===i&&now-autoLast.t<6000){autoLast.t=now;return}
+  autoLast={i,t:now}; showHit(i,code);
+}
+async function autoTick(){
+  if(!scanner||scannerEl!=='reader2'){clearInterval(autoTimer);autoTimer=null;autoTip('');return}
+  const v=document.querySelector('#reader2 video'); if(!v||!v.videoWidth||autoBusy)return;
+  const t=thumb(v), moved=tdiff(t,autoPrev); autoPrev=t;
+  if(autoLock){if(tdiff(t,autoLock)<22)return;autoLock=null}
+  if(moved>7){autoStill=0;autoTip('对准面单，停稳…');return}
+  if(++autoStill<2)return;
+  autoBusy=true; autoLock=t; autoTip('识别中…'); let miss=false;
+  try{
+    const text=await ocr(frameCanvas(v));
+    const m=text.match(TBA), code=m?m[0].toUpperCase():null;
+    if(code&&findByCode(code)>=0){autoHit(findByCode(code),code);return}
+    const addr=extractAddress(text); if(!addr){miss=true;return}   // 保持锁定：画面不动就不再反复识别，省电
+    const r=matchStops(addr), best=r[0], second=r[1];
+    if(best&&best.num===2&&best.street>0&&(!second||second.score<best.score-1)){autoHit(best.i,code);return}
+    if(r.length){showCandidates(r,code,'请选择：'+esc(addr));speak('请选择');return}
+    showBox($('#sortbox'),'miss','<div class="num">?</div><div class="lbl">没有匹配的站点</div><div class="addr">'+esc(addr)+'</div>');$('#cands').innerHTML='';buzz([200,100,200]);
+  }catch(e){autoTip('识别出错：'+(e&&e.message||e));autoLock=null}
+  finally{autoBusy=false; if(autoLock)autoTip(miss?'没读到地址：靠近一点、摆正面单，或挪一下再试':'拿开，换下一件')}
+}
+$('#startSort').onclick=async()=>{
+  speak(''); // iOS 要在点击里先"解锁"语音
+  const ok=await startScanner('reader2',code=>{
+    const i=findByCode(code); if(i<0)return;           // 不认识的条码交给文字识别
+    const v=document.querySelector('#reader2 video'); if(v&&v.videoWidth)autoLock=thumb(v);
+    autoHit(i,code);
+  },true);
+  if(!ok)return;
+  autoPrev=null;autoStill=0;autoLock=null; getWorker(); autoTip('对准面单，停稳…');
+  clearInterval(autoTimer); autoTimer=setInterval(autoTick,450);
+};
+$('#stopSortBtn').onclick=()=>{stopScan();clearInterval(autoTimer);autoTimer=null;autoTip('')};
 $('#resetSort').onclick=()=>{stops.forEach(s=>s.loaded=[]);save();showBox($('#sortbox'),'','<div class="lbl">已重置</div>');$('#cands').innerHTML=''};
 function renderSort(){
   const total=stops.length, done=stops.filter(s=>s.loaded.length).length, pk=stops.reduce((n,s)=>n+s.loaded.length,0);
   $('#sortBar').style.width=(total?done/total*100:0)+'%';
   $('#sortProg').textContent='已分拣 '+done+' / '+total+' 站，共 '+pk+' 件';
+  // 装车最后核对：哪些站还一件都没拍到，或者件数不够
+  const left=stops.map((s,i)=>({s,i})).filter(x=>x.s.status!=='done'&&(x.s.pk?x.s.loaded.length<x.s.pk:!x.s.loaded.length));
+  $('#sortLeft').innerHTML=done&&left.length?'还没分拣齐：'+left.slice(0,30).map(x=>'<b>'+numOf(x.i)+'</b>'+(x.s.pk>1?'('+x.s.loaded.length+'/'+x.s.pk+')':'')).join('、'):(done&&total?'✅ 全部分拣完':'');
+}
+// ---------- 车内分区 ----------
+// 先送的放最顺手的位置；后送的放最里面。按件数和容量比例，把连续的站号段分到各个位置。
+const ZONE_UP='副驾座位 *2\n后座右（路边侧）*2\n后座左 *2\n后备箱 尾门口 *3\n后备箱 靠座椅 *3\n后备箱下层（地板下）*2\n前备箱 *1';
+const ZONE_DOWN='副驾座位 *2\n后备箱 尾门口 *3\n后备箱 中间 *3\n后备箱 最里面（放倒的座椅上）*3\n后备箱下层（地板下）*2\n前备箱 *1';
+let zonesOn=true,zoneText=ZONE_UP;
+try{zonesOn=localStorage.getItem('zonesOn')!=='0';zoneText=localStorage.getItem('zoneText')||ZONE_UP}catch(e){}
+function zoneList(){return zoneText.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{const m=l.match(/^(.*?)\s*\*\s*(\d+(\.\d+)?)\s*$/);return m?{name:m[1].trim(),w:+m[2]||1}:{name:l,w:1}}).filter(z=>z.name&&z.w>0)}
+function zoneMap(){
+  const Z=zoneList(), map=new Map(); if(!Z.length)return map;
+  const list=stops.map((s,i)=>({s,i})).filter(x=>x.s.status!=='done').sort((a,b)=>numOf(a.i)-numOf(b.i));
+  const pk=x=>x.s.pk||Math.max(1,x.s.tba.length), total=list.reduce((n,x)=>n+pk(x),0), W=Z.reduce((n,z)=>n+z.w,0);
+  let cum=0; list.forEach(x=>{const mid=(cum+pk(x)/2)/total*W; cum+=pk(x); let acc=0,k=0; for(;k<Z.length-1;k++){acc+=Z[k].w;if(mid<acc)break} map.set(x.i,Z[k].name)});
+  return map;
+}
+const zoneOf=i=>zoneMap().get(i)||'';
+function renderZones(){
+  $('#zonesOn').checked=zonesOn; if(document.activeElement!==$('#zoneText'))$('#zoneText').value=zoneText;
+  $('#zoneState').textContent=zonesOn?'已开启':'未开启';
+  const m=zoneMap(), g=new Map(); m.forEach((z,i)=>{if(!g.has(z))g.set(z,[]);g.get(z).push(i)});
+  $('#zoneSum').innerHTML=!stops.length?'<li class="small">导入站点后，这里显示每个位置放哪几站</li>':zoneList().map(z=>{const a=g.get(z.name)||[];if(!a.length)return '<li><b>'+esc(z.name)+'</b><span class="small">（空）</span></li>';
+    const n=a.map(numOf), pk=a.reduce((t,i)=>t+(stops[i].pk||Math.max(1,stops[i].tba.length)),0);
+    return '<li><b>'+esc(z.name)+'</b>第 '+Math.min(...n)+(n.length>1?'–'+Math.max(...n):'')+' 站 · '+pk+' 件</li>'}).join('');
+}
+$('#zonesOn').addEventListener('change',e=>{zonesOn=e.target.checked;try{localStorage.setItem('zonesOn',zonesOn?'1':'0')}catch(_){}renderZones()});
+$('#zoneText').addEventListener('input',e=>{zoneText=e.target.value;try{localStorage.setItem('zoneText',zoneText)}catch(_){}renderZones()});
+const setZones=t=>{zoneText=t;$('#zoneText').value=t;try{localStorage.setItem('zoneText',t)}catch(_){}renderZones()};
+$('#zoneSeatsUp').onclick=()=>setZones(ZONE_UP);
+$('#zoneSeatsDown').onclick=()=>setZones(ZONE_DOWN);
+// ---------- 语音读站号 ----------
+let speakOn=true; try{speakOn=localStorage.getItem('speakOn')!=='0'}catch(e){}
+$('#speakOn').checked=speakOn;
+$('#speakOn').addEventListener('change',e=>{speakOn=e.target.checked;try{localStorage.setItem('speakOn',speakOn?'1':'0')}catch(_){} if(speakOn)speak('已开启')});
+function speak(t){
+  if(!speakOn||!window.speechSynthesis)return;
+  if(!t){try{speechSynthesis.speak(new SpeechSynthesisUtterance(' '))}catch(e){}return}
+  try{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(String(t));u.lang='zh-CN';u.rate=1.05;speechSynthesis.speak(u)}catch(e){}
 }
 
 // ---------- ① 手动录入 ----------
@@ -550,7 +687,7 @@ $('#ocrFile').addEventListener('change',async e=>{
   const f=e.target.files[0]; if(!f)return;
   const st=$('#ocrStatus'); st.textContent='OCR 识别中…';
   try{
-    const text=await ocr(f,p=>{st.textContent='OCR '+p+'%'});
+    const text=await ocr(await prepLabel(f),p=>{st.textContent='OCR '+p+'%'});
     const t=text.match(TBA); if(t&&!$('#tba').value)$('#tba').value=t[0].toUpperCase();
     const addr=extractAddress(text);
     const win=text.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/); if(win&&!$('#note').value)$('#note').value='时段 '+win[1]+'-'+win[2];
@@ -610,7 +747,7 @@ function render(){
       </div>
     </div>`).join('');
   $('#optStatus').textContent=ordered?'✅ 已排序':'顺序未排（点「按序号排序」或「自动优化」）';
-  renderExport(); renderDrive(); renderSort();
+  renderExport(); renderDrive(); renderSort(); renderZones();
 }
 window.mv=(i,d)=>{const j=i+d;if(j<0||j>=stops.length)return;[stops[i],stops[j]]=[stops[j],stops[i]];save()};
 window.del=i=>{if(confirm('删除此站？')){stops.splice(i,1);save()}};
@@ -712,7 +849,7 @@ function renderDrive(){
   if(i<0){box.innerHTML='<p>🎉 全部送达</p>';return}
   const s=stops[i];
   box.innerHTML=`<div class="small">${numLbl(i)}</div><div class="num">${numOf(i)}</div><div class="small">站 · 剩 ${stops.filter(x=>x.status==='pending').length} 站${s.loaded.length?' · '+s.loaded.length+' 件':''}</div>
-    <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址'}</div><div class="small">${esc(s.note||'')}</div>
+    <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址'}</div>${zonesOn&&zoneOf(i)?`<div class="zone">📦 在 ${esc(zoneOf(i))}</div>`:''}<div class="small">${esc(s.note||'')}</div>
     ${s.address?`<button class="btn primary big" onclick="sendTesla(${i})">🚗 发送到 Tesla</button>`:`<button class="btn big" onclick="edit(${i})">✏️ 补地址</button>`}
     <button class="btn ok big" onclick="toggle(${i})">✅ 已送达，下一站</button>
     <button class="btn big" onclick="skip(${i})">⏭ 跳过（移到末尾）</button>`;
