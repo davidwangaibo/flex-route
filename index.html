@@ -59,6 +59,9 @@
   .prow input.pseq{width:60px;font-size:18px;font-weight:700;text-align:center;padding:6px;flex-shrink:0}
   .prow input.paddr{flex:1;padding:8px}
   .prow .btn{padding:6px 8px;flex-shrink:0}
+  .prow.unsure input.pseq{background:#fef3c7;border-color:var(--warn)}
+  .prow.dup input.pseq{background:#fee2e2;border-color:var(--accent)}
+  #houseNo{margin-top:8px}
 </style>
 </head>
 <body>
@@ -130,6 +133,7 @@
 <section class="tab" id="tab-sort">
   <div class="card">
     <div class="sortbox" id="sortbox"><div class="lbl">拍面单，或扫条码，或输门牌号</div></div>
+    <input id="houseNo" class="seq" type="text" inputmode="numeric" autocomplete="off" enterkeyhint="done" placeholder="输门牌号，如 2630">
     <div id="cands"></div>
     <div class="bar"><div id="sortBar" style="width:0"></div></div>
     <div class="small" id="sortProg"></div>
@@ -137,8 +141,6 @@
   <div class="card">
     <label class="btn primary big" style="cursor:pointer;text-align:center">📷 拍面单 → 自动显示站号<input type="file" accept="image/*" capture="environment" id="sortPhoto" hidden></label>
     <div class="small" id="sortOcr" style="margin-top:4px;white-space:pre-wrap"></div>
-    <label>或者输门牌号（前几位即可）</label>
-    <input id="houseNo" class="seq" inputmode="numeric" placeholder="740">
   </div>
   <div class="card">
     <div id="reader2" class="reader"></div>
@@ -232,9 +234,30 @@ function showBox(el,cls,html){el.className='sortbox '+cls;el.innerHTML=html}
 function hitHtml(i,extra){const s=stops[i];return '<div class="lbl">'+numLbl(i)+'</div><div class="num">'+numOf(i)+'</div><div class="lbl">站'+(extra||'')+'</div><div class="addr">'+(s.address?esc(s.address):'（缺地址）')+'</div>'}
 
 // ---------- OCR helper ----------
-async function ocr(file,onProgress){
-  const {data}=await Tesseract.recognize(file,'eng',{logger:m=>{if(m.status==='recognizing text'&&onProgress)onProgress(Math.round(m.progress*100))}});
-  return data.text;
+// 复用同一个 Tesseract worker：第一次加载语言包，之后每张图都快很多
+let _worker=null,_ocrProg=null;
+function getWorker(){
+  if(!_worker)_worker=Tesseract.createWorker('eng',1,{logger:m=>{if(m.status==='recognizing text'&&_ocrProg)_ocrProg(Math.round(m.progress*100))}})
+    .catch(e=>{_worker=null;throw e});
+  return _worker;
+}
+async function ocrData(img,onProgress){
+  const w=await getWorker(); _ocrProg=onProgress||null;
+  await w.setParameters({tessedit_char_whitelist:'',tessedit_pageseg_mode:'6'});
+  const {data}=await w.recognize(img,{},{text:true,tsv:true});
+  _ocrProg=null; return data;
+}
+async function ocr(img,onProgress){return (await ocrData(img,onProgress)).text||''}
+// TSV → 行（带纵坐标），用来把站号圆圈和地址对上
+function tsvLines(tsv){
+  const map=new Map();
+  String(tsv||'').split('\n').forEach(r=>{
+    const c=r.split('\t'); if(c.length<12||c[0]!=='5')return; const t=c.slice(11).join(' ').trim(); if(!t)return;
+    const k=c[2]+'-'+c[3]+'-'+c[4], left=+c[6], top=+c[7], h=+c[9];
+    let L=map.get(k); if(!L){L={w:[],y0:top,y1:top+h};map.set(k,L)}
+    L.w.push({left,t}); L.y0=Math.min(L.y0,top); L.y1=Math.max(L.y1,top+h);
+  });
+  return [...map.values()].map(L=>({text:L.w.sort((a,b)=>a.left-b.left).map(w=>w.t).join(' '),y:(L.y0+L.y1)/2})).sort((a,b)=>a.y-b.y);
 }
 function extractAddress(text){
   const lines=text.split('\n').map(l=>l.trim()).filter(Boolean);
@@ -260,91 +283,186 @@ function extractAddress(text){
 const ABBR={avenue:'ave',street:'st',road:'rd',drive:'dr',boulevard:'blvd',lane:'ln',court:'ct',place:'pl',circle:'cir',parkway:'pkwy',highway:'hwy',terrace:'ter',way:'way',north:'n',south:'s',east:'e',west:'w',apartment:'apt',suite:'ste',unit:'unit'};
 function normAddr(a){return a.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(Boolean).map(w=>ABBR[w]||w).join(' ')}
 function tokens(n){const num=(n.match(/^\d+/)||[''])[0];const words=n.split(' ').filter(w=>w!==num&&w.length>1&&!/^\d{5}$/.test(w));return {num,words}}
-// 返回 [{i,score}] 按分数降序。门牌号相同 +3，街道词重合按比例 0~2
+function lev(a,b){if(a===b)return 0;const m=a.length,n=b.length;if(Math.abs(m-n)>1)return 2;let p=Array.from({length:n+1},(_,j)=>j);
+  for(let i=1;i<=m;i++){const c=[i];for(let j=1;j<=n;j++)c[j]=Math.min(p[j]+1,c[j-1]+1,p[j-1]+(a[i-1]===b[j-1]?0:1));p=c}return p[n]}
+const GENERIC=new Set(['st','ave','rd','dr','blvd','ln','ct','pl','cir','pkwy','hwy','ter','way','n','s','e','w','apt','ste','unit','ca','usa','us','the','of']);
+// 返回 [{i,score,num,street}]。num: 2=门牌号完全相同，1=差一个字符（OCR 误读）；street=街名关键词命中数。
+// 所有站点都有的词（城市名 CHINO HILLS、DR/CT 等后缀）不计分，否则门牌号读错时会被城市名"凑够分"误判到别的站。
 function matchStops(addr){
   const q=tokens(normAddr(addr)); if(!q.num&&!q.words.length)return [];
-  return stops.map((s,i)=>{
-    if(!s.address||s.status==='done')return {i,score:0};
-    const t=tokens(normAddr(s.address)); let score=0;
-    if(q.num&&q.num===t.num)score+=3;
-    const inter=q.words.filter(w=>t.words.includes(w)).length;
-    score+=2*inter/Math.max(q.words.length,1);
-    return {i,score};
+  const act=stops.map((s,i)=>({i,t:s.address&&s.status!=='done'?tokens(normAddr(s.address)):null})).filter(x=>x.t);
+  const df={}; act.forEach(x=>new Set(x.t.words).forEach(w=>df[w]=(df[w]||0)+1));
+  const lim=Math.max(1,Math.floor(act.length*0.3));
+  const qk=q.words.filter(w=>!GENERIC.has(w)&&(df[w]||0)<=lim&&!/^\d+$/.test(w));
+  return act.map(({i,t})=>{
+    let score=0,num=0;
+    if(q.num&&t.num){if(q.num===t.num){score+=3;num=2}else if(q.num.length>=3&&lev(q.num,t.num)===1){score+=1.5;num=1}}
+    const street=qk.filter(w=>t.words.some(v=>v===w||(w.length>=5&&lev(v,w)===1))).length;
+    if(street)score+=2*Math.min(1,street/Math.min(2,qk.length));
+    return {i,score,num,street};
   }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
 }
 
 // ---------- ② 导入 Flex 路线截图 ----------
 let previewRows=[];
 // Flex 列表格式（每站）：
-//   ① 圆圈站号（OCR 不一定读得到）
-//   Next stop: / Deliver by the end of day / 10:00 AM - 3:00 PM   ← 时段说明
-//   410 Terry Ave. North                                          ← 街道
-//   Seattle  或  Ontario, CA 91761                                ← 城市（可能没有州、邮编）
-//   Deliver 2 packages                                            ← 件数
-function parseItinerary(text){
-  const lines=text.split('\n').map(l=>l.replace(/[|_]/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
-  const out=[]; let pendingSeq=null, pendingNote='', pendingDone=false;
-  const streetRe=/^(?:(\d{1,3})[.):]?\s+)?(\d{1,6}[A-Za-z]?\s+[A-Za-z][A-Za-z0-9 .#'-]*)$/;
+//   (34) ⏲ Expected by 3:00 PM      ← 蓝色圆圈里是站号（白字蓝底，整页 OCR 基本读不出来，单独裁出来识别）
+//   # B.L37.OV                      ← 分拣区代码
+//   14545 VIOLET ST                 ← 街道
+//   CHINO HILLS                     ← 城市（可能带州、邮编）
+//   Deliver 1 package               ← 件数
+const HDR_RE=/(expected by|deliver(ed)? by|by the end|end of (the )?day|next stop|current stop|delivered at|scheduled|\d{1,2}(:\d{2})?\s*(am|pm)?\s*[-–]\s*\d{1,2}(:\d{2})?\s*(am|pm)?)/i;
+function parseItinerary(lines){
+  lines=lines.map(o=>({y:o.y,t:String(o.text).replace(/[|_]/g,' ').replace(/\s+/g,' ').trim()})).filter(o=>o.t);
+  const out=[]; let hdr={note:'',done:false,num:null};
+  const streetRe=/^(?:(\d{1,3})[.):]\s+)?(\d[\dOIl]{0,5})([A-Za-z]?)\s+([A-Za-z][A-Za-z0-9 .#'-]*)$/;
   const cityStateRe=/^[A-Za-z .'-]+,?\s*[A-Z]{2}\b(\s+\d{5}(-\d{4})?)?$/;
   const cityOnlyRe=/^[A-Za-z][A-Za-z .'-]{1,30}$/;
-  const captionRe=/^(next stop|current stop|deliver|by the end|after you|search by|itinerary|list$|map$|summary|start travel|late$)/i;
-  const winRe=/(\d{1,2}(:\d{2})?\s*(am|pm)?\s*[-–]\s*\d{1,2}(:\d{2})?\s*(am|pm)?|end of (the )?day)/i;
+  const captionRe=/^(next stop|current stop|deliver|by the end|after you|search by|itinerary|list$|map$|summary|start travel|late$|expected|your itinerary)/i;
   const pkRe=/(?:deliver\s+)?(\d+)\s*(packages?|items?|parcels?|pkgs?|个包裹|件)/i;
-  const cleanNote=l=>l.replace(/^.*[•·»«+*]\s*/,'').replace(/^[(\[]\s*/,'').replace(/^[(@©®]?\s*\d{1,3}\s*[)]?\s*/,'').replace(/^(next stop:?|deliver)\s*/i,'').replace(/\s+[A-Z]$/,'').trim();
+  const note=l=>{const m=l.match(/(expected by|deliver by|by)\s+\d{1,2}(:\d{2})?\s*(am|pm)/i)||l.match(/\d{1,2}(:\d{2})?\s*(am|pm)?\s*[-–]\s*\d{1,2}(:\d{2})?\s*(am|pm)?/i)||l.match(/(by )?the end of (the )?day/i);return m?m[0].replace(/^./,c=>c.toUpperCase()):''};
   for(let i=0;i<lines.length;i++){
-    const l=lines[i]; let m;
-    if((m=l.match(/^[(@©®]?\s*(\d{1,3})\s*[)]?$/))){pendingSeq=+m[1];continue}
-    if(/delivered at/i.test(l)){pendingDone=true;continue}                     // "# E-7.3C • Delivered at 18:26"
+    const l=lines[i].t.replace(/^[^A-Za-z0-9#]+/,''); let m;
+    if((m=l.match(/^(\d{1,3})\s*[)]?$/))){hdr.num=+m[1];continue}             // 单独一行的数字（可能是站号，也可能是杂讯）
+    if(HDR_RE.test(l)&&!streetRe.test(l)){                                     // "33) © Expected by 3:00 PM"
+      const n=l.match(/^(\d{1,3})\b/); hdr={note:note(l),done:/delivered/i.test(l),num:n?+n[1]:hdr.num};continue}
     if(pkRe.test(l)&&!streetRe.test(l))continue;
-    if(winRe.test(l)&&!streetRe.test(l)){pendingNote=cleanNote(l);continue}     // "Scheduled 0:00 - 23:59" / "By the end of the day"
-    if((m=l.match(streetRe))&&/[A-Za-z]{2,}/.test(m[2])&&!/^\d{1,2}:\d{2}/.test(l)&&!pkRe.test(l)){
-      let addr=m[2].trim(); const seq=m[1]?+m[1]:pendingSeq; pendingSeq=null;
-      const nx=(lines[i+1]||'').replace(/\s+late$/i,'');
-      if(cityStateRe.test(nx)&&!captionRe.test(nx)){addr+=', '+nx;i++}
-      else if(cityOnlyRe.test(nx)&&!captionRe.test(nx)&&!winRe.test(nx)){addr+=', '+nx;i++}
-      let pk=null; for(let k=1;k<=2;k++){const q=(lines[i+k]||'').match(pkRe);if(q){pk=+q[1];break}}
-      out.push({seq,address:addr,note:pendingNote,pk,done:pendingDone}); pendingNote='';pendingDone=false;
+    if((m=l.match(streetRe))&&/[A-Za-z]{2,}/.test(m[4])&&!/^\d{1,2}:\d{2}/.test(l)){
+      const house=m[2].replace(/O/g,'0').replace(/[Il]/g,'1')+m[3];                // OCR 常把门牌号里的 0/1 读成 O/l
+      let addr=house+' '+m[4].trim();
+      const nx=((lines[i+1]||{}).t||'').replace(/\s+late$/i,''); let city=false;
+      if((cityStateRe.test(nx)||cityOnlyRe.test(nx))&&!captionRe.test(nx)&&!HDR_RE.test(nx)&&!pkRe.test(nx)){addr+=', '+nx;i++;city=true}
+      let pk=null; for(let k=1;k<=2;k++){const q=((lines[i+k]||{}).t||'').match(pkRe);if(q){pk=+q[1];break}}
+      if(!city&&pk==null)continue;                                              // 地图截图上的路名等杂讯：列表里每站都有城市行或件数行
+      out.push({address:addr,note:hdr.note,pk,done:hdr.done,y:lines[i].y,textSeq:m[1]?+m[1]:hdr.num});
+      hdr={note:'',done:false,num:null};
     }
   }
   return out;
 }
-// 小图（如从聊天里转存的截图）放大到 1400 宽再识别，OCR 对小字很敏感
+// 小图放大到 1400 宽再识别，OCR 对小字很敏感；总是返回 canvas，方便读像素找站号圆圈
 function prepImage(file){
-  return new Promise(res=>{
+  return new Promise((res,rej)=>{
     const img=new Image(); const url=URL.createObjectURL(file);
-    img.onload=()=>{URL.revokeObjectURL(url); if(img.width>=1200)return res(file);
-      const k=1400/img.width, c=document.createElement('canvas'); c.width=1400; c.height=Math.round(img.height*k);
-      const ctx=c.getContext('2d'); ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high'; ctx.drawImage(img,0,0,c.width,c.height); res(c)};
-    img.onerror=()=>{URL.revokeObjectURL(url);res(file)}; img.src=url;
+    img.onload=()=>{URL.revokeObjectURL(url);
+      const k=img.width<1200?1400/img.width:1, c=document.createElement('canvas'); c.width=Math.round(img.width*k); c.height=Math.round(img.height*k);
+      const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high'; ctx.drawImage(img,0,0,c.width,c.height); res(c)};
+    img.onerror=()=>{URL.revokeObjectURL(url);rej(new Error('图片无法读取'))}; img.src=url;
   });
 }
-// 多张截图合并：去重（截图有重叠），OCR 读到的站号只在"合理递增"时采用，否则按出现顺序编号
-function finalizeRows(rows){
-  const seen=new Set(); rows=rows.filter(r=>{const k=normAddr(r.address);if(seen.has(k))return false;seen.add(k);return true});
-  let n=0; rows.forEach(r=>{n=(r.seq!=null&&r.seq>n&&r.seq<=n+5)?r.seq:n+1;r.seq=n});
-  return rows;
+// 找左侧的站号圆圈（深蓝，当前站可能是绿色），把圈里的白字转成白底黑字，单独给 OCR
+const isPinPx=(r,g,b)=>(b>r+40&&b>80&&r<110&&g<150)||(g>r+40&&g>b+10&&r<120&&g>80&&g<200);
+function findPins(d,W,H){
+  const X=Math.round(W*0.2), gap=Math.max(2,Math.round(W/150)), pins=[];
+  const at=(x,y)=>(y*W+x)*4, pin=(x,y)=>{const o=at(x,y);return isPinPx(d[o],d[o+1],d[o+2])};
+  const rows=[]; for(let y=0;y<H;y++){let n=0;for(let x=0;x<X;x++)if(pin(x,y)&&++n>=2)break;if(n>=2)rows.push(y)}
+  const blobs=[]; for(const y of rows){const b=blobs[blobs.length-1];if(b&&y-b.y1<=gap)b.y1=y;else blobs.push({y0:y,y1:y})}
+  for(const b of blobs){
+    let x0=X,x1=-1; for(let y=b.y0;y<=b.y1;y++)for(let x=0;x<X;x++)if(pin(x,y)){if(x<x0)x0=x;if(x>x1)x1=x}
+    const w=x1-x0+1,h=b.y1-b.y0+1;
+    if(w<0.03*W||w>0.1*W||h<0.6*w)continue;                                   // 排除顶部导航按钮等
+    const mask=new Uint8Array(w*h); let ink=0;
+    for(let y=b.y0;y<=b.y1;y++){
+      let L=-1,R=-1; for(let x=x0;x<=x1;x++)if(pin(x,y)){if(L<0)L=x;R=x}
+      if(R-L<2)continue;
+      for(let x=L;x<=R;x++){const o=at(x,y);if(d[o]>150&&d[o+1]>150&&d[o+2]>150){mask[(y-b.y0)*w+(x-x0)]=1;ink++}}
+    }
+    if(ink<4)continue;
+    pins.push({y:(b.y0+b.y1)/2,w,h,mask});
+  }
+  return pins;
+}
+function pinCanvas(p){
+  const c=document.createElement('canvas'),s=Math.max(1,Math.round(90/p.h)),pad=Math.round(p.h*s*0.3);
+  c.width=p.w*s+pad*2; c.height=p.h*s+pad*2; const ctx=c.getContext('2d');
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); ctx.fillStyle='#000';
+  for(let y=0;y<p.h;y++)for(let x=0;x<p.w;x++)if(p.mask[y*p.w+x])ctx.fillRect(pad+x*s,pad+y*s,s,s);
+  return c;
+}
+async function readPins(canvas){
+  const W=canvas.width,H=canvas.height, d=canvas.getContext('2d',{willReadFrequently:true}).getImageData(0,0,W,H).data;
+  const pins=findPins(d,W,H); if(!pins.length)return [];
+  const w=await getWorker();
+  await w.setParameters({tessedit_char_whitelist:'0123456789',tessedit_pageseg_mode:'7'});
+  try{for(const p of pins){const {data}=await w.recognize(pinCanvas(p));const n=parseInt(String(data.text||'').replace(/\D/g,''),10);p.n=n>0&&n<1000?n:null}}
+  finally{await w.setParameters({tessedit_char_whitelist:'',tessedit_pageseg_mode:'6'})}
+  return pins.filter(p=>p.n);
+}
+// 一张截图里的站一定是连续的。每个地址取它上方最近的圆圈数字，算 "站号 − 行号"，多数票决定整张图的编号，
+// 个别圆圈读错（比如 21 读成 27）会被投票纠正；顶部被截掉圆圈的那一站也能推出来。
+function assignShot(rows,pins){
+  const votes={};
+  rows.forEach((r,k)=>{
+    if(r.y!=null){const lo=k?rows[k-1].y:-Infinity;const c=pins.filter(p=>p.y<r.y&&p.y>lo);r.pin=c.length?c[c.length-1].n:null}
+    if(r.pin)votes[r.pin-k]=(votes[r.pin-k]||0)+1;
+    if(r.textSeq)votes[r.textSeq-k]=(votes[r.textSeq-k]||0)+0.5;
+  });
+  let best=null,bv=0; for(const o in votes)if(votes[o]>bv){bv=votes[o];best=+o}
+  return best==null||best+rows.length<=0?null:{offset:best,support:bv};
+}
+// 合并多张截图：先用各自读到的站号；读不到的截图靠和别的截图重叠的地址推算；再不行就接在后面并标黄
+function mergeShots(shots){
+  const known=new Map(); // normAddr -> seq
+  const put=sh=>sh.rows.forEach((r,k)=>{r.seq=sh.offset+k;const a=normAddr(r.address);if(!known.has(a))known.set(a,r.seq)});
+  shots.filter(sh=>sh.offset!=null).sort((a,b)=>b.support-a.support).forEach(put);
+  let changed=true;
+  while(changed){changed=false;
+    for(const sh of shots){if(sh.offset!=null||!sh.rows.length)continue;
+      const k=sh.rows.findIndex(r=>known.has(normAddr(r.address)));
+      if(k>=0){sh.offset=known.get(normAddr(sh.rows[k].address))-k;sh.support=0;sh.guess='overlap';put(sh);changed=true}}
+  }
+  for(const sh of shots){if(sh.offset!=null||!sh.rows.length)continue;
+    sh.offset=(known.size?Math.max(...known.values()):0)+1;sh.guess='order';put(sh)}
+  const seen=new Map(), out=[];
+  shots.forEach(sh=>sh.rows.forEach(r=>{
+    const a=normAddr(r.address), prev=seen.get(a);
+    const row={seq:r.seq,address:r.address,note:r.note,pk:r.pk,done:r.done,unsure:!!sh.guess||sh.support<1};
+    if(prev){if(prev.unsure&&!row.unsure)Object.assign(prev,row);return}
+    seen.set(a,row); out.push(row);
+  }));
+  out.sort((a,b)=>a.seq-b.seq);
+  const cnt={}; out.forEach(r=>cnt[r.seq]=(cnt[r.seq]||0)+1); out.forEach(r=>r.dup=cnt[r.seq]>1);
+  return out;
 }
 $('#itinFiles').addEventListener('change',async e=>{
-  const files=[...e.target.files]; if(!files.length)return;
-  const st=$('#itinStatus'); let rows=[];
+  const files=[...e.target.files].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})||a.lastModified-b.lastModified);
+  if(!files.length)return;
+  const st=$('#itinStatus'); const shots=[];
   for(let k=0;k<files.length;k++){
-    st.textContent='识别截图 '+(k+1)+'/'+files.length+'…';
-    try{const src=await prepImage(files[k]);const text=await ocr(src,p=>{st.textContent='识别截图 '+(k+1)+'/'+files.length+'：'+p+'%'});rows=rows.concat(parseItinerary(text))}
-    catch(err){st.textContent='识别失败：'+err;return}
+    const tag='识别截图 '+(k+1)+'/'+files.length;
+    st.textContent=tag+'…';
+    try{
+      const cv=await prepImage(files[k]);
+      const data=await ocrData(cv,p=>{st.textContent=tag+'：'+p+'%'});
+      let lines=tsvLines(data.tsv); if(!lines.length)lines=String(data.text||'').split('\n').map(text=>({text,y:null}));
+      const rows=parseItinerary(lines);
+      st.textContent=tag+'：读站号…';
+      const pins=rows.length?await readPins(cv):[];
+      shots.push({rows,...(assignShot(rows,pins)||{offset:null,support:0}),n:k+1});
+    }catch(err){st.textContent='第 '+(k+1)+' 张识别失败：'+(err&&err.message||err);e.target.value='';return}
   }
-  rows=finalizeRows(rows);
-  previewRows=rows; e.target.value='';
-  if(!rows.length){st.textContent='没识别到地址行。请确认是列表视图截图，或点「手动加一行」。';previewRows=[]}
-  else st.textContent='识别到 '+rows.length+' 站，请核对（可修改序号和地址）：';
+  e.target.value='';
+  previewRows=mergeShots(shots);
+  if(!previewRows.length){st.textContent='没识别到地址。请用 Flex 的列表视图截图（地图视图读不到地址），或点「手动加一行」。';renderPreview();$('#preview').hidden=false;return}
+  const seqs=previewRows.map(r=>r.seq), lo=Math.min(...seqs), hi=Math.max(...seqs);
+  const miss=[]; for(let n=lo;n<=hi;n++)if(!seqs.includes(n))miss.push(n);
+  const msg=['识别到 '+previewRows.length+' 站（第 '+lo+'–'+hi+' 站），请核对：'];
+  shots.forEach(sh=>{if(!sh.rows.length)msg.push('· 第 '+sh.n+' 张没有地址（地图截图？），已跳过');else if(sh.guess==='order')msg.push('· 第 '+sh.n+' 张没读到站号，编号是按顺序推的，标黄，请核对');});
+  if(miss.length)msg.push('· 缺第 '+miss.join('、')+' 站，可能少截了一张');
+  if(previewRows.some(r=>r.dup))msg.push('· 标红的站号重复了，请改正');
+  st.textContent=msg.join('\n');
   renderPreview(); $('#preview').hidden=false;
 });
 function renderPreview(){
-  $('#prows').innerHTML=previewRows.map((r,k)=>`<div class="prow"><input class="pseq" inputmode="numeric" value="${r.seq}" onchange="previewRows[${k}].seq=parseInt(this.value)||0"><input class="paddr" value="${esc(r.address)}" onchange="previewRows[${k}].address=this.value"><button class="btn" onclick="previewRows.splice(${k},1);renderPreview()">✕</button></div>`).join('');
+  $('#prows').innerHTML=previewRows.map((r,k)=>`<div class="prow${r.dup?' dup':r.unsure?' unsure':''}"><input class="pseq" inputmode="numeric" value="${r.seq==null?'':r.seq}" onchange="previewRows[${k}].seq=parseInt(this.value)||0;previewRows[${k}].unsure=false;markDup()"><input class="paddr" value="${esc(r.address)}" onchange="previewRows[${k}].address=this.value"><button class="btn" onclick="previewRows.splice(${k},1);markDup()">✕</button></div>`).join('');
 }
-$('#prowAdd').onclick=()=>{previewRows.push({seq:(previewRows.length?Math.max(...previewRows.map(r=>r.seq))+1:1),address:''});renderPreview();$('#preview').hidden=false};
+window.markDup=()=>{const c={};previewRows.forEach(r=>c[r.seq]=(c[r.seq]||0)+1);previewRows.forEach(r=>r.dup=c[r.seq]>1);renderPreview()};
+$('#prowAdd').onclick=()=>{previewRows.push({seq:(previewRows.length?Math.max(...previewRows.map(r=>r.seq||0))+1:1),address:''});renderPreview();$('#preview').hidden=false};
 $('#importCancel').onclick=()=>{previewRows=[];$('#preview').hidden=true;$('#itinStatus').textContent=''};
 $('#importOk').onclick=()=>{
   const rows=previewRows.filter(r=>r.address.trim()); let added=0,updated=0;
+  // 昨天留下的站点会让门牌号查找和面单匹配到错误的站，默认替换
+  if(stops.length&&rows.length&&confirm('已有 '+stops.length+' 个站点。\n确定 = 替换为这次导入的（新的一天选这个）\n取消 = 合并到现有站点')){stops=[];ordered=false}
   rows.forEach(r=>{
     const k=normAddr(r.address); let s=stops.find(x=>x.address&&normAddr(x.address)===k);
     if(!s&&r.seq)s=stops.find(x=>x.seq===r.seq&&!x.address);
@@ -361,18 +479,20 @@ function showHit(i,code,extra){
   markLoaded(i,code); const s=stops[i];
   const pk=s.pk||s.tba.length;
   showBox($('#sortbox'),'hit',hitHtml(i,' · '+(pk?'该站 '+pk+' 件，':'')+'已分拣 '+s.loaded.length+' 件'+(extra||'')));
-  $('#cands').innerHTML=''; buzz(120);
+  $('#cands').innerHTML=''; $('#houseNo').value=''; $('#houseNo').blur(); buzz(120);
+  $('#sortbox').scrollIntoView({block:'nearest',behavior:'smooth'});
 }
-function showCandidates(list,code,title){
+function showCandidates(list,code,title,max){
   showBox($('#sortbox'),'warn','<div class="lbl">'+title+'</div>');
-  $('#cands').innerHTML=list.slice(0,4).map(x=>`<button class="btn cand" onclick="showHit(${x.i},${code?"'"+code+"'":'null'})"><b>${numOf(x.i)}</b> ${esc(stops[x.i].address)}</button>`).join('');
+  $('#cands').innerHTML=list.slice(0,max||4).map(x=>`<button class="btn cand" onclick="showHit(${x.i},${code?"'"+code+"'":'null'})"><b>${numOf(x.i)}</b> ${esc(stops[x.i].address)}</button>`).join('');
 }
 window.showHit=showHit;
 async function resolveByAddress(addr,code){
   const m=matchStops(addr);
   if(!m.length){showBox($('#sortbox'),'miss','<div class="num">?</div><div class="lbl">没有匹配的站点</div><div class="addr">'+esc(addr)+'</div>');$('#cands').innerHTML='';buzz([200,100,200]);return}
   const best=m[0], second=m[1];
-  if(best.score>=3.5&&(!second||second.score<best.score-0.5)){showHit(best.i,code);return}
+  // 只有"门牌号完全一致 + 街名对上"且明显领先才自动判定，其余让人点一下确认
+  if(best.num===2&&best.street>0&&(!second||second.score<best.score-1)){showHit(best.i,code);return}
   showCandidates(m,code,'请选择：'+esc(addr));
 }
 $('#sortPhoto').addEventListener('change',async e=>{
@@ -387,13 +507,22 @@ $('#sortPhoto').addEventListener('change',async e=>{
   }catch(err){st.textContent='识别失败：'+err}
   e.target.value='';
 });
-$('#houseNo').addEventListener('input',e=>{
-  const v=e.target.value.trim(); if(!v){$('#cands').innerHTML='';return}
-  const list=stops.map((s,i)=>({i,s})).filter(x=>x.s.address&&x.s.status!=='done'&&normAddr(x.s.address).startsWith(v)).map(x=>({i:x.i,score:1}));
-  if(!list.length){$('#cands').innerHTML='<p class="small">没有以 '+esc(v)+' 开头的地址</p>';return}
-  if(list.length===1&&v.length>=3){showHit(list[0].i,null);e.target.value='';return}
-  showCandidates(list,null,'门牌号 '+esc(v)+'…');
-});
+// 门牌号查找：结果显示在输入框正下方（以前显示在页面顶部，键盘弹出时看不到，像是"没反应"）
+function houseLookup(raw,commit){
+  const v=String(raw||'').replace(/\D/g,''); if(!v){$('#cands').innerHTML='';return}
+  const act=stops.map((s,i)=>({i,num:(normAddr(s.address||'').match(/^\d+/)||[''])[0],s})).filter(x=>x.s.address&&x.s.status!=='done');
+  if(!act.length){$('#cands').innerHTML='<p class="small">'+(stops.length?'所有站点都已送达。':'还没有站点，先到「站点」页导入 Flex 路线截图。')+'</p>';return}
+  let list=act.filter(x=>x.num.startsWith(v)), how='开头';
+  if(!list.length){list=act.filter(x=>x.num.includes(v));how='包含'}
+  if(!list.length){$('#cands').innerHTML='<p class="small">没有门牌号'+how+' '+esc(v)+' 的待送站点</p>';return}
+  list.sort((a,b)=>numOf(a.i)-numOf(b.i));
+  const exact=list.filter(x=>x.num===v);
+  if(list.length===1&&(v.length>=3||commit)){showHit(list[0].i,null);return}
+  if(exact.length===1&&(v.length>=4||commit)){showHit(exact[0].i,null);return}
+  showCandidates(list,null,'门牌号'+how+' '+esc(v)+'，点选：',8);
+}
+$('#houseNo').addEventListener('input',e=>houseLookup(e.target.value,false));
+$('#houseNo').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();houseLookup(e.target.value,true)}});
 $('#startSort').onclick=()=>startScanner('reader2',code=>{
   const i=findByCode(code);
   if(i<0){showBox($('#sortbox'),'miss','<div class="num">?</div><div class="lbl">这个条码还不认识，请拍面单</div><div class="addr">'+esc(code)+'</div>');$('#cands').innerHTML='';buzz([200,100,200]);return}
