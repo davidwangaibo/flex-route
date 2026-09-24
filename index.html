@@ -183,6 +183,24 @@
 <!-- ⑤ 导出 -->
 <section class="tab" id="tab-export">
   <div class="card">
+    <h3 style="margin:0 0 6px">📅 导出到日历 → 车机上点选导航</h3>
+    <p class="small" style="margin:0 0 8px">每个待送站变成一个日程（地点 = 地址），按送货顺序排好。Model Y 车机的日历里会列出来，点哪个就导航到哪个，全天不用碰手机。</p>
+    <label class="btn primary big" id="icsOpen" style="text-align:center">📅 加入 iPhone 日历</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+      <button class="btn" id="icsDl">下载 .ics 文件</button>
+    </div>
+    <label style="margin-top:8px;display:block">地址没写州名时自动补上（避免导航到外州同名街道）</label>
+    <input id="defState" maxlength="2" style="width:80px;text-transform:uppercase" placeholder="CA">
+    <details style="margin-top:8px"><summary class="small">第一次使用：设置步骤</summary>
+      <ol class="small" style="padding-left:18px;margin:6px 0">
+        <li>iPhone「日历」App → 左下角「日历」→「添加日历」，新建一个叫 <b>Flex</b> 的日历。</li>
+        <li>iPhone「设置」→「日历」→「默认日历」选 <b>Flex</b>（导入的站点就进这个日历，不混进你自己的日程）。</li>
+        <li>Tesla App → 右上角头像 →「设置」→ 打开「日历同步」；车机屏幕的「日历」里就能看到。手机要用蓝牙连着车（手机钥匙即可）。</li>
+        <li>第二天清理：在「日历」App 里删掉 Flex 日历再新建一个，旧站点一次清空。</li>
+      </ol>
+    </details>
+  </div>
+  <div class="card">
     <h3 style="margin:0 0 8px">Google Maps 多点导航</h3>
     <p class="small">每条链接最多 10 站，多了自动拆分。缺地址的站点不包含。</p>
     <div id="mapLinks"></div>
@@ -767,12 +785,17 @@ $('#clearDone').onclick=()=>{stops=stops.filter(s=>s.status!=='done');save()};
 $('#clearAll').onclick=()=>{if(confirm('清空全部站点？')){stops=[];ordered=false;save()}};
 
 // ---------- Tesla share ----------
-const mapsUrl=a=>'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(a);
+// 地址里没有州/邮编时补上默认州，导航和日历搜地址更准
+let defState='CA'; try{const v=localStorage.getItem('defState');if(v!=null)defState=v}catch(e){}
+const fullAddr=a=>{a=String(a||'').trim(); if(!a||!defState)return a; return /,\s*[A-Za-z]{2}(\s+\d{5}(-\d{4})?)?\s*$/.test(a)||/\d{5}(-\d{4})?\s*$/.test(a)?a:a+', '+defState};
+$('#defState').value=defState;
+$('#defState').addEventListener('change',e=>{defState=e.target.value.trim().toUpperCase().slice(0,2);e.target.value=defState;try{localStorage.setItem('defState',defState)}catch(_){}render()});
+const mapsUrl=a=>'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(fullAddr(a));
 async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){prompt('复制：',t)}}
 window.copy=copy;
 window.sendTesla=async i=>{
   const s=stops[i]; if(!s.address){toast('该站缺地址');return} const url=mapsUrl(s.address);
-  if(navigator.share){try{await navigator.share({title:'第 '+numOf(i)+' 站',text:s.address,url});toast('已分享，请在面板选 Tesla')}catch(e){}}
+  if(navigator.share){try{await navigator.share({title:'第 '+numOf(i)+' 站',text:fullAddr(s.address),url});toast('已分享，请在面板选 Tesla')}catch(e){}}
   else{await copy(url);toast('已复制链接，粘贴到 Tesla App')}
 };
 
@@ -826,7 +849,7 @@ $('#optimize').onclick=async()=>{
 
 // ---------- export ----------
 function renderExport(){
-  const pend=stops.filter(s=>s.status==='pending'&&s.address).map(s=>s.address);
+  const pend=stops.filter(s=>s.status==='pending'&&s.address).map(s=>fullAddr(s.address));
   const box=$('#mapLinks'); if(!pend.length){box.innerHTML='<p class="small">无带地址的待送站点</p>';return}
   const chunks=[]; for(let i=0;i<pend.length;i+=10)chunks.push(pend.slice(i,i+10));
   box.innerHTML=chunks.map((c,k)=>{
@@ -835,6 +858,34 @@ function renderExport(){
     return `<div style="margin:6px 0"><a class="btn" href="${u}" target="_blank" rel="noopener" style="text-decoration:none">🗺 第 ${k+1} 段（${c.length} 站）</a> <button class="btn" data-url="${u}" onclick="copy(this.dataset.url)">复制</button></div>`;
   }).join('');
 }
+// ---------- 日历导出（.ics）----------
+// 从现在起每站排 10 分钟，只是为了让车机日历按送货顺序排列；时间本身不重要。
+function buildIcs(){
+  const list=stops.map((s,i)=>({s,i})).filter(x=>x.s.status==='pending'&&x.s.address);
+  if(!list.length)return null;
+  const p2=n=>String(n).padStart(2,'0'), fmt=d=>d.getFullYear()+p2(d.getMonth()+1)+p2(d.getDate())+'T'+p2(d.getHours())+p2(d.getMinutes())+'00';
+  const t0=new Date(); t0.setSeconds(0,0); t0.setMinutes(Math.ceil((t0.getMinutes()+1)/5)*5);
+  const icsEsc=v=>String(v).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\n/g,'\\n');
+  const day=fmt(t0).slice(0,8), now=new Date(), stamp=now.getUTCFullYear()+p2(now.getUTCMonth()+1)+p2(now.getUTCDate())+'T'+p2(now.getUTCHours())+p2(now.getUTCMinutes())+'00Z';
+  const ev=list.map((x,k)=>{
+    const a=new Date(t0.getTime()+k*600000), b=new Date(a.getTime()+600000), s=x.s;
+    const pk=s.pk||Math.max(1,s.tba.length), z=zonesOn?zoneOf(x.i):'';
+    const title=p2(numOf(x.i))+' 站 · '+s.address.split(',')[0]+(pk>1?' · '+pk+'件':'');
+    const desc=[z?'位置：'+z:'',s.note||'',pk+' 件'].filter(Boolean).join('\n');
+    return ['BEGIN:VEVENT','UID:flex-'+day+'-'+(s.id||k)+'@flex-route','DTSTAMP:'+stamp,'DTSTART:'+fmt(a),'DTEND:'+fmt(b),
+      'SUMMARY:'+icsEsc(title),'LOCATION:'+icsEsc(fullAddr(s.address)),'DESCRIPTION:'+icsEsc(desc),'END:VEVENT'].join('\r\n');
+  });
+  return ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//flex-route//CN','CALSCALE:GREGORIAN','METHOD:PUBLISH','X-WR-CALNAME:Flex '+day,...ev,'END:VCALENDAR'].join('\r\n')+'\r\n';
+}
+$('#icsOpen').onclick=()=>{
+  const t=buildIcs(); if(!t){toast('没有带地址的待送站点');return}
+  // iPhone Safari 打开日历文件会弹出「全部添加」；其他浏览器就下载
+  const url=URL.createObjectURL(new Blob([t],{type:'text/calendar'}));
+  if(/iPhone|iPad|iPod/.test(navigator.userAgent))location.href=url;
+  else{const a=document.createElement('a');a.href=url;a.download='flex-route.ics';a.click()}
+  toast('在弹出的页面点「全部添加」',3000);
+};
+$('#icsDl').onclick=()=>{const t=buildIcs(); if(!t){toast('没有带地址的待送站点');return} dl('flex-route.ics','text/calendar',t)};
 const dl=(name,mime,txt)=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:mime}));a.download=name;a.click()};
 $('#dlCsv').onclick=()=>dl('flex-stops.csv','text/csv','seq,address,packages,tba,note\n'+stops.map((s,i)=>[numOf(i),s.address,s.tba.length,s.tba.join(' '),s.note||''].map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n'));
 $('#dlKml').onclick=()=>dl('flex-stops.kml','application/vnd.google-earth.kml+xml',
@@ -851,9 +902,18 @@ function renderDrive(){
   box.innerHTML=`<div class="small">${numLbl(i)}</div><div class="num">${numOf(i)}</div><div class="small">站 · 剩 ${stops.filter(x=>x.status==='pending').length} 站${s.loaded.length?' · '+s.loaded.length+' 件':''}</div>
     <div class="addr">${s.address?esc(s.address):'⚠️ 缺地址'}</div>${zonesOn&&zoneOf(i)?`<div class="zone">📦 在 ${esc(zoneOf(i))}</div>`:''}<div class="small">${esc(s.note||'')}</div>
     ${s.address?`<button class="btn primary big" onclick="sendTesla(${i})">🚗 发送到 Tesla</button>`:`<button class="btn big" onclick="edit(${i})">✏️ 补地址</button>`}
-    <button class="btn ok big" onclick="toggle(${i})">✅ 已送达，下一站</button>
+    <button class="btn ok big" onclick="doneAndSend(${i})">✅ 已送达 → 下一站发到 Tesla</button>
+    <button class="btn big" onclick="toggle(${i})">已送达（不发送）</button>
     <button class="btn big" onclick="skip(${i})">⏭ 跳过（移到末尾）</button>`;
 }
+// 一次点击：标记已送达，并马上弹出分享面板把下一站发到 Tesla（分享必须在点击里同步调用，iPhone 才允许）
+window.doneAndSend=i=>{
+  stops[i].status='done'; save();
+  const n=stops.findIndex(s=>s.status==='pending');
+  if(n<0){toast('🎉 全部送达');return}
+  if(!stops[n].address){toast('下一站缺地址，请先补上');return}
+  sendTesla(n);
+};
 window.skip=i=>{const [s]=stops.splice(i,1);stops.push(s);save()};
 render();
 </script>
