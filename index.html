@@ -533,10 +533,18 @@ function showHit(i,code,extra){
   speak(numOf(i)+' 号'+(pk>1?'，'+pk+' 件':'')+(z?'，'+z.replace(/[（(].*?[)）]/g,''):''));
   $('#sortbox').scrollIntoView({block:'nearest',behavior:'smooth'});
 }
+// 候选按钮记住的是站点对象本身而不是数组下标：中途清除已送达、重新导入或重排后，旧按钮不会点到别的站
+let candRefs=[],candCode=null;
 function showCandidates(list,code,title,max){
   showBox($('#sortbox'),'warn','<div class="lbl">'+title+'</div>');
-  $('#cands').innerHTML=list.slice(0,max||4).map(x=>`<button class="btn cand" onclick="showHit(${x.i},${code?"'"+code+"'":'null'})"><b>${numOf(x.i)}</b> ${esc(stops[x.i].address)}</button>`).join('');
+  const top=list.slice(0,max||4); candRefs=top.map(x=>stops[x.i]); candCode=code||null;
+  $('#cands').innerHTML=top.map((x,k)=>`<button class="btn cand" onclick="pickCand(${k})"><b>${numOf(x.i)}</b> ${esc(stops[x.i].address)}</button>`).join('');
 }
+window.pickCand=k=>{
+  const i=stops.indexOf(candRefs[k]);
+  if(i<0){$('#cands').innerHTML='';toast('站点列表已变动，请重新识别这一件');return}
+  showHit(i,candCode);
+};
 window.showHit=showHit;
 async function resolveByAddress(addr,code){
   const m=matchStops(addr);
@@ -824,7 +832,12 @@ function orderStops(start,list){
     }}
   return route;
 }
+let optimizing=false;
 $('#optimize').onclick=async()=>{
+  if(optimizing){toast('正在优化，请稍候');return}
+  optimizing=true; try{await runOptimize()}finally{optimizing=false}
+};
+async function runOptimize(){
   const key=$('#apiKey').value.trim(); const pend=stops.filter(s=>s.status==='pending'&&s.address);
   if(pend.length<2){toast('有地址的待送站点不足');return}
   if(!confirm('自动优化按直线距离重排，会覆盖 Flex 顺序（序号本身保留）。继续？'))return;
