@@ -189,6 +189,8 @@
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
       <button class="btn" id="icsDl">下载 .ics 文件</button>
     </div>
+    <label style="margin-top:8px;display:block">「发送到 Tesla」先用哪个地图 App 打开地址（再从地图 App 分享给 Tesla）</label>
+    <select id="navApp" style="width:auto"><option value="apple">Apple 地图</option><option value="google">Google 地图（需已安装）</option></select>
     <label style="margin-top:8px;display:block">地址没写州名时自动补上（避免导航到外州同名街道）</label>
     <input id="defState" maxlength="2" style="width:80px;text-transform:uppercase" placeholder="CA">
     <details style="margin-top:8px"><summary class="small">第一次使用：设置步骤</summary>
@@ -238,6 +240,11 @@ try{$('#apiKey').value=localStorage.getItem('gkey')||''}catch(e){}
 $('#apiKey').addEventListener('change',e=>{try{localStorage.setItem('gkey',e.target.value.trim())}catch(_){}});
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TBA=/TBA[0-9A-Z]{10,}/i;
+// OCR 常把面单上的 TBA 读成 1BA / IBA / T8A，中间还可能插空格；Amazon 的 TBA 是 TBA + 12 位数字
+function tbaFrom(text){
+  const m=String(text||'').match(TBA); if(m)return m[0].toUpperCase();
+  const k=String(text||'').match(/(?:^|[^A-Z0-9])[T1Il7|]\s?[B8]A\s?(\d{12})(?!\d)/i); return k?'TBA'+k[1]:null;
+}
 const findByCode=code=>stops.findIndex(s=>s.tba.includes(code));
 const numOf=i=>stops[i].seq!=null?stops[i].seq:(i+1);
 const numLbl=i=>stops[i].seq!=null?'第':'（未排序）第';
@@ -284,13 +291,60 @@ function getWorker(){
     .catch(e=>{_worker=null;throw e});
   return _worker;
 }
-async function ocrData(img,onProgress){
+async function ocrData(img,onProgress,psm){
   const w=await getWorker(); _ocrProg=onProgress||null;
-  await w.setParameters({tessedit_char_whitelist:'',tessedit_pageseg_mode:'6'});
+  await w.setParameters({tessedit_char_whitelist:'',tessedit_pageseg_mode:psm||'6'});
   const {data}=await w.recognize(img,{},{text:true,tsv:true});
   _ocrProg=null; return data;
 }
-async function ocr(img,onProgress){return (await ocrData(img,onProgress)).text||''}
+async function ocr(img,onProgress,psm){return (await ocrData(img,onProgress,psm)).text||''}
+// 面单照片：版面复杂（大号分拣码、条码、小字地址混在一起），按「单块文字」识别常常读乱。
+// 依次尝试：自动版面 → 稀疏文字 → 旋转 90°/270°（面单横着拍），读到地址或已知条码就停。
+// 找出照片里的白色面单（亮且不偏色），裁掉纸箱。纸箱的纹理会让 OCR 读出一堆乱码，把地址淹没。
+// 面单被纸箱裂缝/胶带切开时会分成几块白色区域，把上下相邻、左右对齐的几块合并起来。
+function labelBox(d,W,H){
+  const white=o=>{const r=d[o],g=d[o+1],b=d[o+2],mn=Math.min(r,g,b);return mn>150&&Math.max(r,g,b)-mn<45};
+  const seen=new Uint8Array(W*H), comps=[], q=new Int32Array(W*H);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const s0=y*W+x; if(seen[s0]||!white(s0*4))continue;
+    let h=0,t=0,n=0,x0=x,x1=x,y0=y,y1=y; q[t++]=s0; seen[s0]=1;
+    while(h<t){const p=q[h++],px=p%W,py=(p-px)/W;n++;if(px<x0)x0=px;if(px>x1)x1=px;if(py<y0)y0=py;if(py>y1)y1=py;
+      for(const np of [px>0?p-1:-1,px<W-1?p+1:-1,py>0?p-W:-1,py<H-1?p+W:-1])if(np>=0&&!seen[np]&&white(np*4)){seen[np]=1;q[t++]=np}}
+    comps.push({n,x0,y0,x1,y1});
+  }
+  if(!comps.length)return null;
+  comps.sort((a,b)=>b.n-a.n); const b=comps[0]; if(b.n<W*H*0.03)return null;
+  const box={x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1};
+  for(const c of comps.slice(1)){if(c.n<b.n*0.05)break;
+    const ov=Math.min(box.x1,c.x1)-Math.max(box.x0,c.x0); if(ov>0.5*(c.x1-c.x0)){box.x0=Math.min(box.x0,c.x0);box.y0=Math.min(box.y0,c.y0);box.x1=Math.max(box.x1,c.x1);box.y1=Math.max(box.y1,c.y1)}}
+  return box;
+}
+// 把画布裁成面单区域并转灰度；太小就放大。找不到面单时返回整张（灰度）
+function cropLabel(src){
+  const W=src.width,H=src.height,k=200/Math.max(W,H),sw=Math.max(1,Math.round(W*k)),sh=Math.max(1,Math.round(H*k));
+  const sm=document.createElement('canvas');sm.width=sw;sm.height=sh;const sx=sm.getContext('2d',{willReadFrequently:true});sx.drawImage(src,0,0,sw,sh);
+  const b=labelBox(sx.getImageData(0,0,sw,sh).data,sw,sh);
+  let x0=0,y0=0,cw=W,ch=H;
+  if(b){const m=20;x0=Math.max(0,Math.floor(b.x0/k)-m);y0=Math.max(0,Math.floor(b.y0/k)-m);cw=Math.min(W,Math.ceil((b.x1+1)/k)+m)-x0;ch=Math.min(H,Math.ceil((b.y1+1)/k)+m)-y0}
+  const up=cw<900?Math.min(2.5,1200/cw):1, c=document.createElement('canvas');   // 只在面单拍得很小时放大；放大本身会让数字变糊（实测 2600 被读成 9600） c.width=Math.round(cw*up); c.height=Math.round(ch*up);
+  const x=c.getContext('2d',{willReadFrequently:true}); x.imageSmoothingQuality='high'; x.drawImage(src,x0,y0,cw,ch,0,0,c.width,c.height);
+  const id=x.getImageData(0,0,c.width,c.height),d=id.data;
+  for(let o=0;o<d.length;o+=4){const v=0.299*d[o]+0.587*d[o+1]+0.114*d[o+2];d[o]=d[o+1]=d[o+2]=v}
+  x.putImageData(id,0,0); return c;
+}
+function rotateCanvas(c,deg){const r=document.createElement('canvas');r.width=c.height;r.height=c.width;const x=r.getContext('2d');x.translate(r.width/2,r.height/2);x.rotate(deg*Math.PI/180);x.drawImage(c,-c.width/2,-c.height/2);return r}
+async function ocrLabel(img,onStep){
+  const tries=[['3',0,'识别'],['11',0,'换个方式再读'],['3',90,'旋转 90° 再读'],['3',270,'旋转 270° 再读']];
+  let last='';
+  for(const [psm,deg,name] of tries){
+    if(deg&&!(img instanceof HTMLCanvasElement))break;
+    const src=deg?rotateCanvas(img,deg):img;
+    const text=await ocr(src,p=>onStep&&onStep(name+' '+p+'%'),psm); last=text;
+    const code=tbaFrom(text);
+    if((code&&findByCode(code)>=0)||extractAddress(text))return text;
+  }
+  return last;
+}
 // TSV → 行（带纵坐标），用来把站号圆圈和地址对上
 function tsvLines(tsv){
   const map=new Map();
@@ -303,16 +357,20 @@ function tsvLines(tsv){
   return [...map.values()].map(L=>({text:L.w.sort((a,b)=>a.left-b.left).map(w=>w.t).join(' '),y:(L.y0+L.y1)/2})).sort((a,b)=>a.y-b.y);
 }
 function extractAddress(text){
-  const lines=text.split('\n').map(l=>l.trim()).filter(Boolean);
-  const zipRe=/([A-Za-z .'-]+),?\s+([A-Z]{2})\s+(\d{5})(-\d{4})?/;
+  const lines=text.split('\n').map(l=>l.replace(/[;|:'"“”‘’_~]+/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+  const zipRe=/([A-Za-z .'-]+),?\s+([A-Z]{2})\s+(\d{5})/;
+  // 另一种 Amazon 面单把邮编放在前面："91722-3427 COVINA , CA United States"
+  const zipFirstRe=/^(\d{5})(?:\s?[-—–~]\s?\d{3,4})?\s+([A-Za-z .'-]+?)\s*,\s*([A-Z]{2})\b/i;
   for(let i=0;i<lines.length;i++){
-    const m=lines[i].match(zipRe); if(!m)continue;
-    const cityLine=m[1].trim()+', '+m[2]+' '+m[3];
+    let m=lines[i].match(zipRe), cityLine;
+    if(m)cityLine=m[1].trim()+', '+m[2]+' '+m[3];
+    else if((m=lines[i].match(zipFirstRe)))cityLine=m[2].replace(/\s+/g,' ').trim()+', '+m[3].toUpperCase()+' '+m[1];
+    else continue;
     const street=[];
     for(let j=i-1;j>=0&&street.length<2;j--){
       const l=lines[j];
       if(/^\d+\s+\S/.test(l)){street.unshift(l);break}
-      if(/^(apt|unit|ste|suite|#|bldg)/i.test(l)){street.unshift(l);continue}
+      if(/^(apt|unit|ste|suite|#|bldg)/i.test(l)||/^#?\s*[A-Z]?\d{1,5}[A-Z]?$/i.test(l)){street.unshift(l);continue}   // 面单上 "APT" 和 "311" 常分两行
       if(street.length)break;
     }
     if(street.length)return street.join(' ')+', '+cityLine;
@@ -337,8 +395,12 @@ function matchStops(addr){
   const df={}; act.forEach(x=>new Set(x.t.words).forEach(w=>df[w]=(df[w]||0)+1));
   const lim=Math.max(1,Math.floor(act.length*0.3));
   const qk=q.words.filter(w=>!GENERIC.has(w)&&(df[w]||0)<=lim&&!/^\d+$/.test(w));
+  // 公寓：同一个门牌号可能有好几站（APT 205、APT 311…），门牌号一样时靠单元号区分
+  const unitOf=a=>{const m=normAddr(a).match(/\b(?:apt|unit|ste|bldg)\s*([a-z]?\d+[a-z]?)\b/);return m?m[1]:''};
+  const qu=unitOf(addr);
   return act.map(({i,t})=>{
-    let score=0,num=0;
+    let score=0,num=0; const su=unitOf(stops[i].address);
+    if(qu&&su)score+=qu===su?2:-2;
     if(q.num&&t.num){if(q.num===t.num){score+=3;num=2}else if(q.num.length>=3&&lev(q.num,t.num)===1){score+=1.5;num=1}}
     const street=qk.filter(w=>t.words.some(v=>v===w||(w.length>=5&&lev(v,w)===1))).length;
     if(street)score+=2*Math.min(1,street/Math.min(2,qk.length));
@@ -559,23 +621,22 @@ function prepLabel(file){
   return new Promise(res=>{
     const img=new Image(), url=URL.createObjectURL(file);
     img.onload=()=>{URL.revokeObjectURL(url);
-      const k=Math.min(1,1800/Math.max(img.width,img.height)), c=document.createElement('canvas');
+      // 面单地址字很小，缩得太狠会读不出来：长边保留 2600 像素；再裁出白色面单区域
+      const k=Math.min(1,2600/Math.max(img.width,img.height)), c=document.createElement('canvas');
       c.width=Math.round(img.width*k); c.height=Math.round(img.height*k);
-      const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0,c.width,c.height);
-      const id=ctx.getImageData(0,0,c.width,c.height), d=id.data;
-      for(let o=0;o<d.length;o+=4){let v=0.299*d[o]+0.587*d[o+1]+0.114*d[o+2];v=v<110?Math.max(0,v*0.7):Math.min(255,v*1.15);d[o]=d[o+1]=d[o+2]=v}
-      ctx.putImageData(id,0,0); res(c)};
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      res(cropLabel(c))};
     img.onerror=()=>{URL.revokeObjectURL(url);res(file)}; img.src=url;
   });
 }
 $('#sortPhoto').addEventListener('change',async e=>{
   const f=e.target.files[0]; if(!f)return; const st=$('#sortOcr'); st.textContent='识别中…';
   try{
-    const text=await ocr(await prepLabel(f),p=>{st.textContent='识别 '+p+'%'});
-    const t=text.match(TBA); const code=t?t[0].toUpperCase():null;
+    const text=await ocrLabel(await prepLabel(f),m=>{st.textContent=m});
+    const code=tbaFrom(text);
     if(code){const i=findByCode(code);if(i>=0){showHit(i,code);st.textContent='';e.target.value='';return}}
     const addr=extractAddress(text);
-    if(!addr){st.textContent='没读到地址，请输门牌号。OCR 原文：\n'+text.slice(0,200);e.target.value='';return}
+    if(!addr){st.textContent='没读到地址（可以靠近一点、让面单占满画面再拍），或直接输门牌号。\n读到的文字：\n'+text.replace(/\n{2,}/g,'\n').slice(0,300);e.target.value='';return}
     st.textContent='读到：'+addr; await resolveByAddress(addr,code);
   }catch(err){st.textContent='识别失败：'+err}
   e.target.value='';
@@ -629,8 +690,8 @@ async function autoTick(){
   if(++autoStill<2)return;
   autoBusy=true; autoLock=t; autoTip('识别中…'); let miss=false;
   try{
-    const text=await ocr(frameCanvas(v));
-    const m=text.match(TBA), code=m?m[0].toUpperCase():null;
+    const text=await ocr(cropLabel(frameCanvas(v)),null,'3');
+    const code=tbaFrom(text);
     if(code&&findByCode(code)>=0){autoHit(findByCode(code),code);return}
     const addr=extractAddress(text); if(!addr){miss=true;return}   // 保持锁定：画面不动就不再反复识别，省电
     const r=matchStops(addr), best=r[0], second=r[1];
@@ -713,8 +774,8 @@ $('#ocrFile').addEventListener('change',async e=>{
   const f=e.target.files[0]; if(!f)return;
   const st=$('#ocrStatus'); st.textContent='OCR 识别中…';
   try{
-    const text=await ocr(await prepLabel(f),p=>{st.textContent='OCR '+p+'%'});
-    const t=text.match(TBA); if(t&&!$('#tba').value)$('#tba').value=t[0].toUpperCase();
+    const text=await ocrLabel(await prepLabel(f),m=>{st.textContent=m});
+    const t=tbaFrom(text); if(t&&!$('#tba').value)$('#tba').value=t;
     const addr=extractAddress(text);
     const win=text.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/); if(win&&!$('#note').value)$('#note').value='时段 '+win[1]+'-'+win[2];
     if(addr){$('#addr').value=addr;st.textContent='已识别地址，请核对。'}
@@ -796,15 +857,22 @@ $('#clearAll').onclick=()=>{if(confirm('清空全部站点？')){stops=[];ordere
 // 地址里没有州/邮编时补上默认州，导航和日历搜地址更准
 let defState='CA'; try{const v=localStorage.getItem('defState');if(v!=null)defState=v}catch(e){}
 const fullAddr=a=>{a=String(a||'').trim(); if(!a||!defState)return a; return /,\s*[A-Za-z]{2}(\s+\d{5}(-\d{4})?)?\s*$/.test(a)||/\d{5}(-\d{4})?\s*$/.test(a)?a:a+', '+defState};
+let navApp='apple'; try{navApp=localStorage.getItem('navApp')||'apple'}catch(e){}
 $('#defState').value=defState;
+$('#navApp').value=navApp;
+$('#navApp').addEventListener('change',e=>{navApp=e.target.value;try{localStorage.setItem('navApp',navApp)}catch(_){}});
 $('#defState').addEventListener('change',e=>{defState=e.target.value.trim().toUpperCase().slice(0,2);e.target.value=defState;try{localStorage.setItem('defState',defState)}catch(_){}render()});
 const mapsUrl=a=>'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(fullAddr(a));
 async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){prompt('复制：',t)}}
 window.copy=copy;
-window.sendTesla=async i=>{
-  const s=stops[i]; if(!s.address){toast('该站缺地址');return} const url=mapsUrl(s.address);
-  if(navigator.share){try{await navigator.share({title:'第 '+numOf(i)+' 站',text:fullAddr(s.address),url});toast('已分享，请在面板选 Tesla')}catch(e){}}
-  else{await copy(url);toast('已复制链接，粘贴到 Tesla App')}
+// Tesla App 只认地图 App 分享出来的位置；从网页直接分享文字/链接，Tesla 会提示"内容无法分享"或根本不出现。
+// 所以先在地图 App 里打开这个地址，再从地图 App 的「分享」发给 Tesla。
+window.sendTesla=i=>{
+  const s=stops[i]; if(!s||!s.address){toast('该站缺地址');return}
+  const a=encodeURIComponent(fullAddr(s.address));
+  const url=navApp==='google'?'comgooglemaps://?q='+a:'https://maps.apple.com/?q='+a;
+  toast(navApp==='google'?'在 Google 地图点「分享」→ 选 Tesla':'在地图里点地址 →「分享」→ 选 Tesla',4000);
+  location.href=url;
 };
 
 // ---------- geocode + local route optimization ----------
