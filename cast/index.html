@@ -62,6 +62,8 @@ input[type=range]{width:100%;accent-color:var(--go);height:32px;margin:6px 0}
 
 /* 车机 */
 #car{position:fixed;inset:0;background:#000;overflow:hidden}
+video::cue{font-size:clamp(22px,3vw,40px)}
+#p-extra{display:grid;grid-template-columns:1fr 1fr}#p-prev{order:1}#p-next{order:2}#p-rate{order:3}#p-sub-pick{order:4}
 #stage iframe,#stage video{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
 #idle{position:absolute;inset:0;background:var(--bg);display:grid;grid-template-columns:1fr auto;gap:6vw;align-items:center;padding:6vh 7vw}
 #idle h1{font-size:clamp(22px,2.6vw,36px);margin:0;font-weight:600;color:var(--soft)}
@@ -129,19 +131,21 @@ input[type=range]{width:100%;accent-color:var(--go);height:32px;margin:6px 0}
     <div class="pane" data-pane="web" hidden>
       <label class="field-title" for="url">视频或网页链接</label>
       <input id="url" type="url" placeholder="https://…" autocapitalize="off" autocorrect="off" enterkeyhint="go">
-      <div class="row"><button class="go" id="send-url">在车机播放</button></div>
-      <p class="hint">支持 YouTube、MP4、WebM、MP3、M3U8 直链和普通网页。视频只能在驻车时观看，挂挡后 Tesla 会暂停。</p>
+      <div class="row"><button class="go" id="send-url">在车机播放</button><button id="send-direct">按视频直链播放</button></div>
+      <p class="hint">支持 YouTube、MP4、WebM、MP3、M3U8 直链和普通网页。链接没有文件后缀、却打开成网页时，点“按视频直链播放”。视频只能在驻车时观看，挂挡后 Tesla 会暂停。</p>
     </div>
 
     <div class="pane" data-pane="file" hidden>
-      <label class="pick">选择手机里的视频或音频
-        <input id="file" type="file" accept="video/*,audio/*">
+      <label class="check" style="margin:0 0 8px"><input type="radio" name="fmode" id="mode-stream" checked>边传边播：马上开始，手机要留在本页</label>
+      <label class="check" style="margin:0 0 16px"><input type="radio" name="fmode" id="mode-full">先传完再播：传完后可以切去别的 App</label>
+      <label class="pick">选择视频或音频（可多选）
+        <input id="file" type="file" accept="video/*,audio/*" multiple>
       </label>
       <div id="xfer" hidden>
         <progress id="xfer-bar" max="1" value="0"></progress>
         <div class="row" style="align-items:center"><span id="xfer-text" style="flex:1"></span><button id="xfer-stop">取消</button></div>
       </div>
-      <p class="hint">文件要传完才开始播放，传输时请留在本页。Apple Music、Spotify 等 App 的声音请直接用蓝牙连到 Tesla。</p>
+      <p class="hint">多选的文件会按顺序连续播放。Apple Music、Spotify 等 App 的声音请直接用蓝牙连到 Tesla。</p>
     </div>
 
     <div id="player" hidden>
@@ -153,6 +157,12 @@ input[type=range]{width:100%;accent-color:var(--go);height:32px;margin:6px 0}
           <button id="p-back">后退 15 秒</button>
           <button id="p-toggle" class="go">暂停</button>
           <button id="p-fwd">前进 15 秒</button>
+        </div>
+        <div class="row" id="p-extra">
+          <button id="p-prev">上一个</button>
+          <button id="p-rate">1 倍速</button>
+          <label class="pick" id="p-sub-pick" style="flex:1;padding:8px;border-radius:10px;border-style:solid;font-weight:400;display:flex;align-items:center;justify-content:center;min-height:48px;background:#0d2a33">加字幕<input id="p-sub" type="file" accept=".srt,.vtt"></label>
+          <button id="p-next">下一个</button>
         </div>
         <div class="vol"><label for="p-vol">音量</label><input id="p-vol" type="range" min="0" max="100" value="100"></div>
       </div>
@@ -166,6 +176,7 @@ input[type=range]{width:100%;accent-color:var(--go);height:32px;margin:6px 0}
   <div id="stage">
     <iframe id="frame" hidden allow="autoplay; encrypted-media; fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>
     <video id="video" hidden playsinline></video>
+    <audio id="audio" hidden></audio>
     <div id="audio-card" hidden></div>
     <div id="idle">
       <div>
@@ -2534,9 +2545,13 @@ if(role==='car') startCar(); else if(role==='phone') startPhone(); else {
 /* ================= 车机 ================= */
 function startCar(){
   $('car').hidden=false;
-  const video=$('video'), frame=$('frame');
+  const frame=$('frame'), videoEl=$('video'), audioEl=$('audio');
+  let video=videoEl;
   let code=store.get('carCode'); if(!code){code=newCode();store.set('carCode',code)}
-  let peer, ctrl=null, hls=null, blobUrl=null, mode='idle', title='', err='', needTap=false, incoming=null;
+  let peer, ctrl=null, streamConn=null, hls=null, mode='idle', title='', err='', needTap=false, incoming=null;
+  let queue=[], qi=-1, qMode='', resumeKey=null, resumeDone=false, rate=1, hlsTries=0, directUrl=null, streamBroken=false, lastSave=0, subUrl=null;
+  const ranges=new Map();
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
 
   function showCode(){
     $('bigcode').textContent=code;
@@ -2550,19 +2565,25 @@ function startCar(){
   function pushState(){
     send({t:'state',mode,title,err,needTap,playing:!video.paused&&!video.ended,
       time:video.currentTime||0,dur:isFinite(video.duration)?video.duration:0,
-      vol:video.volume,muted:video.muted});
+      vol:video.volume,rate,idx:qi,len:queue.length,isVideo:video===videoEl});
   }
   setInterval(()=>{ if(mode==='media') pushState() },1000);
 
+  function dropQueue(){
+    queue.forEach(i=>{ if(i.url)URL.revokeObjectURL(i.url) });
+    queue=[];qi=-1;qMode='';incoming=null;streamBroken=false;directUrl=null;
+  }
   function clearStage(){
     if(hls){hls.destroy();hls=null}
-    video.pause();video.removeAttribute('src');video.load();
+    [videoEl,audioEl].forEach(m=>{m.pause();m.removeAttribute('src');m.load()});
+    videoEl.querySelectorAll('track').forEach(t=>t.remove());
+    if(subUrl){URL.revokeObjectURL(subUrl);subUrl=null}
     frame.removeAttribute('src');
-    video.hidden=frame.hidden=$('audio-card').hidden=true;
+    videoEl.hidden=frame.hidden=$('audio-card').hidden=true;
     $('idle').hidden=true;$('bar').hidden=true;$('open-top').hidden=true;$('overlay').hidden=true;
-    err='';needTap=false;
+    err='';needTap=false;resumeKey=null;resumeDone=false;
   }
-  function goIdle(){clearStage();mode='idle';title='';$('idle').hidden=false;pushState()}
+  function goIdle(){dropQueue();clearStage();mode='idle';title='';$('idle').hidden=false;pushState()}
   function showFrame(src,t,kind){
     clearStage();mode=kind;title=t;frame.src=src;frame.hidden=false;$('bar').hidden=false;pushState();
   }
@@ -2576,40 +2597,81 @@ function startCar(){
     });
   }
   function fail(text){err=text;$('overlay').hidden=false;$('overlay').textContent=text;pushState()}
-  function playMedia(src,t,audioHint){
-    clearStage();mode='media';title=t;video.hidden=false;$('bar').hidden=false;
+  function playMedia(src,t,audioHint,key){
+    clearStage();mode='media';title=t;resumeKey=key||src;$('bar').hidden=false;
+    video=audioHint?audioEl:videoEl;
+    video.hidden=false;
     if(audioHint){$('audio-card').hidden=false;$('audio-card').textContent=t}
     video.src=src;tryPlay();pushState();
   }
   function playHls(src,t){
-    clearStage();mode='media';title=t;video.hidden=false;$('bar').hidden=false;
+    clearStage();mode='media';title=t;resumeKey=src;video=videoEl;video.hidden=false;$('bar').hidden=false;hlsTries=0;
     if(window.Hls&&Hls.isSupported()){
       hls=new Hls();hls.loadSource(src);hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED,tryPlay);
-      hls.on(Hls.Events.ERROR,(_,d)=>{ if(d.fatal) fail('这个 M3U8 无法播放：来源可能禁止外站访问，或链接已失效。') });
+      hls.on(Hls.Events.ERROR,(_,d)=>{
+        if(!d.fatal)return;
+        if(hlsTries++<3&&d.type===Hls.ErrorTypes.NETWORK_ERROR){setTimeout(()=>hls&&hls.startLoad(),1500*hlsTries);return}
+        if(hlsTries<=3&&d.type===Hls.ErrorTypes.MEDIA_ERROR){hls.recoverMediaError();return}
+        fail('这个 M3U8 无法播放：来源可能禁止外站访问，或链接已失效。');
+      });
     } else { video.src=src;tryPlay() }
     pushState();
   }
-  video.addEventListener('loadedmetadata',()=>{
-    if(!video.videoWidth&&!video.videoHeight&&mode==='media'){$('audio-card').hidden=false;$('audio-card').textContent=title}
-    pushState();
-  });
-  ['play','pause','seeked','volumechange','ended'].forEach(e=>video.addEventListener(e,pushState));
-  video.addEventListener('error',()=>{
-    if(mode==='media'&&video.getAttribute('src')) fail('这个文件无法播放：格式可能不受 Tesla 浏览器支持（常见于 HEVC 视频），或链接不允许外站访问。');
+  function playQ(i){
+    const it=queue[i]; if(!it)return;
+    qi=i;streamBroken=false;
+    const key=it.name+':'+it.size, audio=it.mime.startsWith('audio/');
+    if(qMode==='stream') return playMedia(new URL('__stream/'+it.id,location.href).href,it.name,audio,key);
+    if(it.url) return playMedia(it.url,it.name,audio,key);
+    clearStage();mode='media';title=it.name;$('bar').hidden=false;$('overlay').hidden=false;
+    $('overlay').textContent='正在从手机接收：'+it.name;pushState();
+  }
+  function posKey(){return 'pos:'+resumeKey}
+  [videoEl,audioEl].forEach(m=>{
+    m.addEventListener('loadedmetadata',()=>{
+      if(m!==video)return;
+      if(m===videoEl&&!m.videoWidth&&!m.videoHeight&&mode==='media'){$('audio-card').hidden=false;$('audio-card').textContent=title}
+      m.playbackRate=rate;
+      if(!resumeDone&&resumeKey){
+        resumeDone=true;
+        const p=+store.get(posKey());
+        if(p>10&&p<m.duration-30)m.currentTime=p;
+      }
+      pushState();
+    });
+    m.addEventListener('timeupdate',()=>{
+      if(m===video&&resumeKey&&Date.now()-lastSave>5000){lastSave=Date.now();store.set(posKey(),String(m.currentTime))}
+    });
+    ['play','pause','seeked','volumechange'].forEach(e=>m.addEventListener(e,()=>{ if(m===video)pushState() }));
+    m.addEventListener('ended',()=>{
+      if(m!==video)return;
+      store.del(posKey());
+      if(qi>=0&&qi<queue.length-1)playQ(qi+1); else pushState();
+    });
+    m.addEventListener('error',()=>{
+      if(m!==video||mode!=='media'||!m.getAttribute('src'))return;
+      if(directUrl){const u=directUrl;directUrl=null;return playHls(u,title)}
+      if(qMode==='stream'&&(!ctrl||!ctrl.open||!streamConn||!streamConn.open)){
+        streamBroken=true;return fail('手机连接断开了。回到手机上的车机投送页面，会自动接着播。');
+      }
+      fail('这个文件无法播放：格式可能不受 Tesla 浏览器支持（常见于 HEVC 视频），或链接不允许外站访问。');
+    });
   });
   $('overlay').addEventListener('click',()=>{ if(needTap) tryPlay() });
   $('car-stop').onclick=goIdle;
 
-  function handleUrl(raw){
+  function handleUrl(raw,direct){
     let u; try{u=new URL(raw)}catch{ return }
     if(u.protocol!=='https:'&&u.protocol!=='http:') return;     // 拒绝 javascript: 等协议
+    dropQueue();
     const path=u.pathname.toLowerCase();
     const yt=u.hostname.match(/(^|\.)youtube\.com$/)?u.searchParams.get('v')||(u.pathname.match(/^\/(?:shorts|live|embed)\/([\w-]+)/)||[])[1]
       :u.hostname==='youtu.be'?u.pathname.slice(1):null;
     const name=decodeURIComponent(path.split('/').pop()||u.hostname);
     if(yt) return showFrame('https://www.youtube-nocookie.com/embed/'+encodeURIComponent(yt)+'?autoplay=1','YouTube','web');
-    if(/\.m3u8$/.test(path)) return playHls(u.href,name);
+    if(/m3u8/i.test(u.href)) return playHls(u.href,name);
+    if(direct){playMedia(u.href,name,false);directUrl=u.href;return}
     if(/\.(mp3|m4a|aac|flac|wav|ogg|opus)$/.test(path)) return playMedia(u.href,name,true);
     if(/\.(mp4|m4v|webm|mov)$/.test(path)) return playMedia(u.href,name,false);
     showFrame(u.href,u.hostname,'web');
@@ -2617,6 +2679,7 @@ function startCar(){
   }
   function handleMap(m){
     const q=String(m.q||'').slice(0,300); if(!q) return;
+    dropQueue();
     const from=typeof m.lat==='number'&&typeof m.lng==='number'?`saddr=${m.lat},${m.lng}&daddr=`:'q=';
     showFrame('https://www.google.com/maps?'+from+encodeURIComponent(q)+'&output=embed',q,'map');
   }
@@ -2624,41 +2687,87 @@ function startCar(){
     if(m.a==='toggle'){ video.paused?tryPlay():video.pause() }
     else if(m.a==='seek'&&typeof m.v==='number'){ video.currentTime=Math.max(0,m.v) }
     else if(m.a==='vol'&&typeof m.v==='number'){ video.volume=Math.min(1,Math.max(0,m.v)) }
+    else if(m.a==='rate'&&typeof m.v==='number'){ rate=Math.min(3,Math.max(.5,m.v));video.playbackRate=rate }
+    else if(m.a==='prev'){ if(video.currentTime>5||qi<=0)video.currentTime=0; else playQ(qi-1) }
+    else if(m.a==='next'){ if(qi<queue.length-1)playQ(qi+1) }
     else if(m.a==='stop'){ goIdle() }
     pushState();
   }
+  function handleSub(text){
+    if(mode!=='media'||video!==videoEl||typeof text!=='string')return;
+    const vtt=/^\uFEFF?WEBVTT/.test(text)?text:'WEBVTT\n\n'+text.replace(/\r/g,'').replace(/(\d\d:\d\d:\d\d),(\d{3})/g,'$1.$2');
+    videoEl.querySelectorAll('track').forEach(t=>t.remove());
+    if(subUrl)URL.revokeObjectURL(subUrl);
+    subUrl=URL.createObjectURL(new Blob([vtt],{type:'text/vtt'}));
+    const tr=document.createElement('track');
+    tr.kind='subtitles';tr.src=subUrl;tr.srclang='zh';tr.label='字幕';tr.default=true;
+    videoEl.appendChild(tr);tr.track.mode='showing';
+  }
 
-  /* 接收文件 */
+  /* 播放列表与文件 */
+  function handleQueue(m){
+    const items=Array.isArray(m.items)?m.items:[];
+    if(!items.length)return;
+    if(m.mode==='stream'&&!navigator.serviceWorker?.controller){send({t:'need-full'});return}
+    dropQueue();qMode=m.mode==='stream'?'stream':'full';
+    queue=items.map(i=>({id:String(i.id),name:String(i.name||'文件'),size:+i.size||0,mime:String(i.mime||'')}));
+    playQ(0);
+  }
   function fileStart(m){
-    incoming={id:m.id,name:String(m.name||'文件'),size:+m.size||0,mime:String(m.mime||''),parts:[],pending:[],pendingSize:0,got:0,last:0};
-    clearStage();mode='idle';$('overlay').hidden=false;
-    $('overlay').textContent='正在从手机接收：'+incoming.name;
+    const it=queue.find(i=>i.id===String(m.id)); if(!it)return;
+    incoming={it,parts:[],pending:[],pendingSize:0,got:0,last:0};
+    send({t:'fready',id:m.id});
   }
   function fileChunk(buf){
     const f=incoming; if(!f) return;
     f.pending.push(buf);f.pendingSize+=buf.byteLength;f.got+=buf.byteLength;
     if(f.pendingSize>=32*1024*1024){f.parts.push(new Blob(f.pending));f.pending=[];f.pendingSize=0}
-    if(f.got-f.last>=512*1024||f.got>=f.size){f.last=f.got;send({t:'fprog',id:f.id,got:f.got})}
-    if(f.got>=f.size){
-      const blob=new Blob([...f.parts,...f.pending],{type:f.mime});
+    const done=f.got>=f.it.size;
+    if(f.got-f.last>=512*1024||done){f.last=f.got;send({t:'fprog',id:f.it.id,got:f.got})}
+    if(done){
+      f.it.url=URL.createObjectURL(new Blob([...f.parts,...f.pending],{type:f.it.mime}));
       incoming=null;
-      if(blobUrl)URL.revokeObjectURL(blobUrl);
-      blobUrl=URL.createObjectURL(blob);
-      playMedia(blobUrl,f.name,f.mime.startsWith('audio/'));
+      if(queue[qi]===f.it&&!video.getAttribute('src'))playQ(qi);
     }
+  }
+  /* 边传边播：Service Worker 要数据 → 问手机 → 收齐后交回 */
+  const rangeReply=(r,o)=>r.src.postMessage(Object.assign({t:'range-res',rid:r.rid},o),o.buf?[o.buf]:[]);
+  if(navigator.serviceWorker)navigator.serviceWorker.addEventListener('message',e=>{
+    const m=e.data; if(!m||m.t!=='range-req')return;
+    const it=queue.find(i=>i.id===m.id);
+    const r={src:e.source,rid:m.rid};
+    if(!it||!ctrl||!ctrl.open||m.start>=it.size)return rangeReply(r,{error:true});
+    const end=Math.min(m.end,it.size-1), len=end-m.start+1;
+    r.it=it;r.buf=new Uint8Array(len);r.got=0;
+    ranges.set(m.rid,r);
+    ctrl.send({t:'rr',rid:m.rid,id:m.id,start:m.start,end});
+  });
+  function onStreamConn(c){
+    streamConn=c;
+    c.on('data',d=>{
+      const u=d instanceof ArrayBuffer?new Uint8Array(d):d&&d.buffer?new Uint8Array(d.buffer,d.byteOffset,d.byteLength):null;
+      if(!u||u.length<4)return;
+      const rid=new DataView(u.buffer,u.byteOffset,4).getUint32(0);
+      const r=ranges.get(rid); if(!r)return;
+      r.buf.set(u.subarray(4),r.got);r.got+=u.length-4;
+      if(r.got>=r.buf.length){ranges.delete(rid);rangeReply(r,{buf:r.buf.buffer,total:r.it.size,mime:r.it.mime})}
+    });
   }
 
   function onCtrl(c){
     if(ctrl&&ctrl!==c){try{ctrl.close()}catch{}}
     ctrl=c;
-    c.on('open',()=>{status('手机已连接');pushState()});
+    c.on('open',()=>{status('手机已连接');pushState();if(streamBroken)setTimeout(()=>playQ(qi),800)});
     c.on('data',m=>{
       if(!m||typeof m!=='object')return;
       if(m.t==='map')handleMap(m);
-      else if(m.t==='url')handleUrl(String(m.url||''));
+      else if(m.t==='url')handleUrl(String(m.url||''),!!m.direct);
+      else if(m.t==='queue')handleQueue(m);
+      else if(m.t==='sub')handleSub(m.text);
+      else if(m.t==='rr-err'&&ranges.has(m.rid)){const r=ranges.get(m.rid);ranges.delete(m.rid);rangeReply(r,{error:true})}
       else if(m.t==='ctl')handleCtl(m);
       else if(m.t==='file')fileStart(m);
-      else if(m.t==='file-cancel'){incoming=null;if(mode==='idle')goIdle()}
+      else if(m.t==='file-cancel'){goIdle()}
     });
     c.on('close',()=>{ if(ctrl===c){ctrl=null;status('手机已断开，等待重新连接…')} });
   }
@@ -2673,7 +2782,7 @@ function startCar(){
     status('正在连接服务…');
     peer=new Peer(peerId(code),peerOpts());
     peer.on('open',()=>status('等待手机连接'));
-    peer.on('connection',c=>{ c.label==='file'?onFileConn(c):onCtrl(c) });
+    peer.on('connection',c=>{ c.label==='file'?onFileConn(c):c.label==='stream'?onStreamConn(c):onCtrl(c) });
     peer.on('disconnected',()=>{ if(!peer.destroyed){status('网络中断，正在重连…');setTimeout(()=>{ if(!peer.destroyed)peer.reconnect() },2000)} });
     peer.on('error',e=>{
       if(e.type==='unavailable-id'){status('配对码正在释放，稍等几秒…');setTimeout(openPeer,5000)}
@@ -2687,7 +2796,7 @@ function startCar(){
 /* ================= 手机 ================= */
 function startPhone(){
   $('phone').hidden=false;
-  let fileTotal=0, peer=null, ctrl=null, fileConn=null, code=null, state=null, retry=null, wake=null, cancelXfer=false, seeking=false;
+  let peer=null, ctrl=null, fileConn=null, streamOut=null, picked=[], acks=new Map(), serveChain=Promise.resolve(), code=null, state=null, retry=null, wake=null, cancelXfer=false, seeking=false;
 
   const msg=t=>{$('msg').textContent=t||''};
   function setLink(on,text){$('dot').classList.toggle('on',on);$('linktext').textContent=text}
@@ -2701,7 +2810,7 @@ function startPhone(){
     code=c;clearTimeout(retry);
     if(!silent)msg('正在连接…');
     if(peer)peer.destroy();
-    ctrl=null;fileConn=null;
+    ctrl=null;fileConn=null;streamOut=null;
     peer=new Peer(undefined,peerOpts());
     const timer=setTimeout(()=>{ if(!ctrl||!ctrl.open){ fail('连接超时：确认 Tesla 上的页面开着、配对码正确。') } },15000);
     function fail(t){
@@ -2716,6 +2825,7 @@ function startPhone(){
         history.replaceState(null,'',location.pathname+location.search);
         requestWake();
         fileConn=peer.connect(peerId(c),{label:'file',serialization:'raw',reliable:true});
+        streamOut=peer.connect(peerId(c),{label:'stream',serialization:'raw',reliable:true});
       });
       k.on('data',onData);
       k.on('close',()=>{ if(ctrl===k){ctrl=null;setLink(false,'连接已断开，正在重连…');retry=setTimeout(()=>connect(c,true),2000)} });
@@ -2781,45 +2891,93 @@ function startPhone(){
     if(!/^https?:\/\//i.test(u))u='https://'+u;
     send({t:'url',url:u});
   };
+  $('send-direct').onclick=()=>{
+    let u=$('url').value.trim();if(!u){$('url').focus();return}
+    if(!/^https?:\/\//i.test(u))u='https://'+u;
+    send({t:'url',url:u,direct:true});
+  };
   $('url').addEventListener('keydown',e=>{if(e.key==='Enter')$('send-url').click()});
 
   /* 文件 */
-  $('file').onchange=async e=>{
-    const f=e.target.files[0];e.target.value='';if(!f)return;
-    if(!ctrl||!ctrl.open||!fileConn){setLink(false,'连接已断开，正在重连…');connect(code,true);return}
-    if(f.size>1.5*1024**3&&!confirm('文件超过 1.5 GB，可能耗尽车机内存。继续发送吗？'))return;
-    await sendFile(f);
+  $('file').onchange=e=>{
+    const list=[...e.target.files];e.target.value='';if(!list.length)return;
+    if(!ctrl||!ctrl.open){setLink(false,'连接已断开，正在重连…');connect(code,true);return}
+    picked=list.map((f,i)=>({id:Date.now()+'-'+i,file:f}));
+    startPicked($('mode-full').checked?'full':'stream');
   };
-  async function waitOpen(c){ for(let i=0;i<100&&!c.open;i++)await new Promise(r=>setTimeout(r,100)); return c.open }
-  async function sendFile(f){
-    const id=Date.now();cancelXfer=false;fileTotal=f.size;
+  const describe=p=>({id:p.id,name:p.file.name,size:p.file.size,mime:p.file.type});
+  function startPicked(m){
+    ctrl.send({t:'queue',mode:m,items:picked.map(describe)});
+    if(m==='full')sendAll();
+  }
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  async function waitOpen(c){ for(let i=0;i<100&&c&&!c.open;i++)await sleep(100); return c&&c.open }
+  async function drain(conn){
+    const dc=conn.dataChannel;
+    while(dc.bufferedAmount>1024*1024||conn.bufferSize>32){
+      await sleep(15);
+      if(dc.readyState!=='open')throw new Error('closed');
+    }
+  }
+  const ack=key=>new Promise(res=>acks.set(key,res));
+  async function sendAll(){
+    cancelXfer=false;
     $('xfer').hidden=false;$('xfer-bar').value=0;$('xfer-text').textContent='准备发送…';
     if(!await waitOpen(fileConn)){$('xfer-text').textContent='文件通道没有连上，请重试。';return}
-    ctrl.send({t:'file',id,name:f.name,size:f.size,mime:f.type});
     const CH=16*1024, READ=4*1024*1024;
-    const dc=fileConn.dataChannel;
     try{
-      for(let off=0;off<f.size&&!cancelXfer;off+=READ){
-        const buf=await f.slice(off,off+READ).arrayBuffer();
-        for(let i=0;i<buf.byteLength&&!cancelXfer;i+=CH){
-          while(dc.bufferedAmount>1024*1024||fileConn.bufferSize>32){
-            await new Promise(r=>setTimeout(r,15));
-            if(dc.readyState!=='open')throw new Error('closed');
+      for(let n=0;n<picked.length&&!cancelXfer;n++){
+        const {id,file:f}=picked[n];
+        xferNow={n,total:picked.length,size:f.size,id};
+        const ready=ack('r'+id);
+        ctrl.send({t:'file',id});await ready;
+        const done=ack('d'+id);
+        for(let off=0;off<f.size&&!cancelXfer;off+=READ){
+          const buf=await f.slice(off,off+READ).arrayBuffer();
+          for(let i=0;i<buf.byteLength&&!cancelXfer;i+=CH){
+            await drain(fileConn);
+            fileConn.send(buf.slice(i,i+CH));
           }
-          fileConn.send(buf.slice(i,i+CH));
         }
+        if(!cancelXfer)await done;
       }
-      if(cancelXfer){ctrl.send({t:'file-cancel'});$('xfer').hidden=true}
+      if(cancelXfer)ctrl.send({t:'file-cancel'});
+      $('xfer').hidden=true;
     }catch{ $('xfer-text').textContent='传输中断。回到本页后重新选择文件。' }
+  }
+  let xferNow=null;
+  /* 边传边播：按车机要求读取一段 */
+  function serveRange(m){
+    serveChain=serveChain.then(async()=>{
+      const p=picked.find(x=>x.id===m.id);
+      if(!p||!streamOut||!await waitOpen(streamOut)){send({t:'rr-err',rid:m.rid});return}
+      try{
+        const buf=new Uint8Array(await p.file.slice(m.start,m.end+1).arrayBuffer());
+        const CH=16*1024;
+        for(let i=0;i<buf.length;i+=CH){
+          await drain(streamOut);
+          const part=buf.subarray(i,i+CH), out=new Uint8Array(part.length+4);
+          new DataView(out.buffer).setUint32(0,m.rid);
+          out.set(part,4);
+          streamOut.send(out.buffer);
+        }
+      }catch{ send({t:'rr-err',rid:m.rid}) }
+    });
   }
   $('xfer-stop').onclick=()=>{cancelXfer=true};
 
   /* 车机回传 */
   function onData(m){
     if(!m)return;
-    if(m.t==='fprog'){
-      $('xfer-text').textContent='已送达 '+(m.got/1048576).toFixed(1)+' MB';
-      if(fileTotal){$('xfer-bar').value=m.got/fileTotal;if(m.got>=fileTotal){$('xfer').hidden=true}}
+    if(m.t==='rr')serveRange(m);
+    else if(m.t==='need-full'){$('mode-full').checked=true;startPicked('full')}
+    else if(m.t==='fready'){const f=acks.get('r'+m.id);if(f){acks.delete('r'+m.id);f()}}
+    else if(m.t==='fprog'){
+      if(xferNow&&xferNow.id===m.id){
+        $('xfer-bar').value=m.got/xferNow.size;
+        $('xfer-text').textContent=`第 ${xferNow.n+1}/${xferNow.total} 个：${(m.got/1048576).toFixed(1)} / ${(xferNow.size/1048576).toFixed(1)} MB`;
+        if(m.got>=xferNow.size){const f=acks.get('d'+m.id);if(f){acks.delete('d'+m.id);f()}}
+      }
     } else if(m.t==='state'){state=m;drawPlayer()}
   }
 
@@ -2835,6 +2993,11 @@ function startPhone(){
       if(!seeking)$('p-seek').value=s.dur?s.time/s.dur*1000:0;
       $('p-seek').disabled=!s.dur;
       $('p-vol').value=Math.round(s.vol*100);
+      $('p-rate').textContent=s.rate+' 倍速';
+      $('p-prev').hidden=$('p-next').hidden=!(s.len>1);
+      $('p-next').disabled=s.idx>=s.len-1;
+      $('p-sub-pick').hidden=!s.isVideo;
+      $('p-title').textContent=(s.len>1?`${s.idx+1}/${s.len} `:'')+s.title;
     }
     $('p-err').textContent=s.err||(s.needTap?'请在 Tesla 屏幕上点一下，开始播放。':'');
   }
@@ -2843,6 +3006,17 @@ function startPhone(){
   $('p-back').onclick=()=>state&&ctl('seek',state.time-15);
   $('p-fwd').onclick=()=>state&&ctl('seek',state.time+15);
   $('p-stop').onclick=()=>ctl('stop');
+  $('p-prev').onclick=()=>ctl('prev');
+  $('p-next').onclick=()=>ctl('next');
+  $('p-rate').onclick=()=>{const r=[1,1.25,1.5,2],i=r.indexOf(state?state.rate:1);ctl('rate',r[(i+1)%r.length])};
+  $('p-sub').onchange=async e=>{
+    const f=e.target.files[0];e.target.value='';if(!f)return;
+    if(f.size>200*1024){$('p-err').textContent='字幕文件超过 200 KB，发送不了。';return}
+    const buf=await f.arrayBuffer();
+    let text;
+    try{text=new TextDecoder('utf-8',{fatal:true}).decode(buf)}catch{text=new TextDecoder('gbk').decode(buf)}
+    send({t:'sub',text});
+  };
   $('p-seek').oninput=()=>{seeking=true};
   $('p-seek').onchange=()=>{seeking=false;if(state&&state.dur)ctl('seek',$('p-seek').value/1000*state.dur)};
   $('p-vol').onchange=()=>ctl('vol',$('p-vol').value/100);
